@@ -1,0 +1,10 @@
+data/*.db
+data/*.db-shm
+data/*.db-wal
+__pycache__/
+*.pyc
+.env
+node_modules/
+frontend/dist/
+*.log
+app.pid
