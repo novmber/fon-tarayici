@@ -19,6 +19,9 @@ export default function App() {
   const [filterType, setFilterType] = useState('Tümü')
   const [filterRisk, setFilterRisk] = useState('Tümü')
   const [sortBy, setSortBy] = useState('name')
+  const [viewMode, setViewMode] = useState('list') // 'list' | 'compare'
+  const [compareA, setCompareA] = useState('')
+  const [compareB, setCompareB] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -123,7 +126,13 @@ export default function App() {
         </div>
 
         {/* Fon Ekle butonu */}
-        {sBtn(() => setShowAdd(!showAdd), showAdd ? '✕ Kapat' : '+ Fon Ekle')}
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => setViewMode(viewMode === 'compare' ? 'list' : 'compare')}
+            style={{ background: viewMode === 'compare' ? 'rgba(255,209,102,0.15)' : 'rgba(255,255,255,0.05)', color: viewMode === 'compare' ? '#FFD166' : '#94a3b8', border: `1px solid ${viewMode === 'compare' ? 'rgba(255,209,102,0.3)' : 'rgba(255,255,255,0.1)'}`, borderRadius: 8, padding: '7px 14px', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
+            ⚖️ {viewMode === 'compare' ? 'Listeye Dön' : 'Kıyasla'}
+          </button>
+          {sBtn(() => setShowAdd(!showAdd), showAdd ? '✕ Kapat' : '+ Fon Ekle')}
+        </div>
       </div>
 
       {/* Fon Ekle / PDF Panel */}
@@ -287,12 +296,106 @@ export default function App() {
                     🔍 Sonuç bulunamadı
                   </div>
                 )}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 16 }}>
+          {viewMode === 'compare' && (
+            <div style={{ padding: '24px 0' }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: '#FFD166', marginBottom: 16 }}>⚖️ Karşılaştırmak istediğiniz iki fonu seçin</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 24 }}>
+                {[['A', compareA, setCompareA], ['B', compareB, setCompareB]].map(([label, val, setter]) => (
+                  <div key={label}>
+                    <div style={{ fontSize: 11, color: '#475569', marginBottom: 8 }}>FON {label}</div>
+                    <select value={val} onChange={e => setter(e.target.value)}
+                      style={{ width: '100%', background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, padding: '9px 12px', color: val ? '#f1f5f9' : '#475569', fontSize: 13, cursor: 'pointer' }}>
+                      <option value="">Fon seçin...</option>
+                      {funds.map(f => <option key={f.code} value={f.code}>{f.code} — {f.name}</option>)}
+                    </select>
+                  </div>
+                ))}
+              </div>
+              {compareA && compareB && (() => {
+                const fA = funds.find(f => f.code === compareA)
+                const fB = funds.find(f => f.code === compareB)
+                if (!fA || !fB) return null
+                const rows = [
+                  { label: 'Fon Adı', a: fA.name, b: fB.name, type: 'text' },
+                  { label: 'Fon Türü', a: fA.fundType || '—', b: fB.fundType || '—', type: 'text' },
+                  { label: 'Aylık Getiri', a: fA.monthlyReturn, b: fB.monthlyReturn, type: 'pct', better: 'high' },
+                  { label: 'Yıllık Getiri', a: fA.yearlyReturn, b: fB.yearlyReturn, type: 'pct', better: 'high' },
+                  { label: 'Risk Skoru', a: fA.riskScore, b: fB.riskScore, type: 'risk', better: 'low' },
+                  { label: 'Portföy Büyüklüğü', a: fA.totalValue, b: fB.totalValue, type: 'aum', better: 'high' },
+                  { label: 'Yatırımcı Sayısı', a: fA.participantCount, b: fB.participantCount, type: 'num', better: 'high' },
+                ]
+                const fmt = (v, type) => {
+                  if (v == null) return '—'
+                  if (type === 'pct') return (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
+                  if (type === 'risk') return v + '/7'
+                  if (type === 'aum') return v >= 1e9 ? '₺' + (v/1e9).toFixed(1) + 'B' : '₺' + (v/1e6).toFixed(0) + 'M'
+                  if (type === 'num') return v.toLocaleString('tr-TR')
+                  return v
+                }
+                const winner = (row) => {
+                  if (!row.better || row.a == null || row.b == null) return null
+                  if (row.better === 'high') return row.a > row.b ? 'a' : row.b > row.a ? 'b' : null
+                  return row.a < row.b ? 'a' : row.b < row.a ? 'b' : null
+                }
+                return (
+                  <div style={{ background: '#0f172a', borderRadius: 12, overflow: 'hidden', border: '1px solid #1e293b' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', background: '#0a0a1a', padding: '12px 16px', fontSize: 12, fontWeight: 700 }}>
+                      <div style={{ color: '#475569' }}>METRİK</div>
+                      <div style={{ color: '#00C2A8', textAlign: 'center' }}>{fA.code}</div>
+                      <div style={{ color: '#FFD166', textAlign: 'center' }}>{fB.code}</div>
+                    </div>
+                    {rows.map((row, i) => {
+                      const w = winner(row)
+                      return (
+                        <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', padding: '11px 16px', borderTop: '1px solid #1e293b', fontSize: 13 }}>
+                          <div style={{ color: '#64748b', fontSize: 12 }}>{row.label}</div>
+                          <div style={{ textAlign: 'center', fontWeight: w === 'a' ? 700 : 400, color: w === 'a' ? '#00C2A8' : row.type === 'pct' && row.a != null ? (row.a >= 0 ? '#00C2A8' : '#FF6B6B') : '#f1f5f9' }}>
+                            {fmt(row.a, row.type)}{w === 'a' ? ' ✓' : ''}
+                          </div>
+                          <div style={{ textAlign: 'center', fontWeight: w === 'b' ? 700 : 400, color: w === 'b' ? '#FFD166' : row.type === 'pct' && row.b != null ? (row.b >= 0 ? '#00C2A8' : '#FF6B6B') : '#f1f5f9' }}>
+                            {fmt(row.b, row.type)}{w === 'b' ? ' ✓' : ''}
+                          </div>
+                        </div>
+                      )
+                    })}
+                    <div style={{ padding: '16px', borderTop: '1px solid #1e293b' }}>
+                      <div style={{ fontSize: 11, color: '#475569', marginBottom: 12 }}>PORTFÖY DAĞILIMI</div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                        {[fA, fB].map((f, fi) => (
+                          <div key={fi}>
+                            <div style={{ fontSize: 11, color: fi === 0 ? '#00C2A8' : '#FFD166', marginBottom: 8 }}>{f.code}</div>
+                            {(f.portfolioItems || []).slice(0, 5).map((item, ii) => (
+                              <div key={ii} style={{ marginBottom: 8 }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#64748b', marginBottom: 3 }}>
+                                  <span>{item.name}</span><span>{item.value?.toFixed(1)}%</span>
+                                </div>
+                                <div style={{ height: 3, background: '#1e293b', borderRadius: 2 }}>
+                                  <div style={{ height: '100%', width: item.value + '%', background: fi === 0 ? 'rgba(0,194,168,0.5)' : 'rgba(255,209,102,0.5)', borderRadius: 2 }} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })()}
+            </div>
+          )}
+          <div style={{ display: viewMode === 'compare' ? 'none' : 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 16 }}>
             {filtered.map(fund => (
               <FundCard
                 key={fund.code}
                 fund={fund}
-                onClick={() => setSelected(fund)}
+                onClick={() => {
+                  if (viewMode === 'compare') {
+                    if (!compareA) setCompareA(fund.code)
+                    else if (!compareB && fund.code !== compareA) setCompareB(fund.code)
+                  } else {
+                    setSelected(fund)
+                  }
+                }}
                 onRefresh={() => handleRefresh(fund.code)}
               />
             ))}
