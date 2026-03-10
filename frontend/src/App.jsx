@@ -103,7 +103,7 @@ export default function App() {
           <div style={{ width: 36, height: 36, borderRadius: 10, background: 'linear-gradient(135deg,#00C2A8,#118AB2)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>📊</div>
           <div>
             <div style={{ fontWeight: 800, fontSize: 18, letterSpacing: -0.5 }}>Fon Tarayıcı</div>
-            <div style={{ color: '#475569', fontSize: 11 }}>TEFAS · KAP · AI Analiz</div>
+            <div style={{ color: '#475569', fontSize: 11 }}>TEFAS · KAP · Evolver AI</div>
           </div>
         </div>
 
