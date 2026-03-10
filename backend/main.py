@@ -703,6 +703,20 @@ async def refresh_fund(fund_code: str):
                 top_holdings=json.dumps(top_holdings, ensure_ascii=False),
             ))
             new_count += 1
+        # Fiyat geçmişinden aylık/yıllık getiri hesapla
+        all_prices = (await session.execute(
+            select(FundRecord.date_key, FundRecord.unit_price)
+            .where(FundRecord.fund_code == fund_code, FundRecord.unit_price > 0)
+            .order_by(FundRecord.date_key)
+        )).fetchall()
+        if len(all_prices) >= 2:
+            latest_price = all_prices[-1][1]
+            price_30d = all_prices[max(0, len(all_prices)-31)][1]
+            price_365d = all_prices[max(0, len(all_prices)-252)][1]
+            calc_monthly = round((latest_price - price_30d) / price_30d * 100, 2) if price_30d else None
+            calc_yearly = round((latest_price - price_365d) / price_365d * 100, 2) if price_365d else None
+        else:
+            calc_monthly = calc_yearly = None
         from sqlalchemy import update
         # Mevcut en iyi değerleri bul (eski kayıtlardan)
         existing_meta = (await session.execute(
@@ -730,6 +744,10 @@ async def refresh_fund(fund_code: str):
             update_vals["top_holdings"] = json.dumps(top_holdings, ensure_ascii=False)
         elif existing_meta and existing_meta.top_holdings:
             update_vals["top_holdings"] = existing_meta.top_holdings
+        if calc_monthly is not None:
+            update_vals["monthly_return"] = calc_monthly
+        if calc_yearly is not None:
+            update_vals["yearly_return"] = calc_yearly
         if update_vals:
             await session.execute(update(FundRecord).where(FundRecord.fund_code == fund_code).values(**update_vals))
         await session.commit()
