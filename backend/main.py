@@ -67,6 +67,7 @@ class FundRecord(Base):
     twitter_summary: Mapped[str] = mapped_column(Text, default="")
     raw_pdf_text: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    published: Mapped[Optional[int]] = mapped_column(Integer, default=0, nullable=True)
 
 
 class EvolverMemory(Base):
@@ -624,6 +625,54 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     scheduler.shutdown()
+
+@app.post("/api/funds/{fund_code}/publish")
+async def publish_fund(fund_code: str, published: bool = True):
+    fund_code = fund_code.upper()
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(FundRecord).where(FundRecord.fund_code == fund_code)
+            .order_by(FundRecord.date_key.desc()).limit(1))
+        rec = result.scalar_one_or_none()
+        if not rec:
+            raise HTTPException(404, "Fon bulunamadı")
+        rec.published = 1 if published else 0
+        await session.commit()
+    return {"ok": True, "fund_code": fund_code, "published": published}
+
+@app.get("/api/public/funds")
+async def get_public_funds():
+    """fonar.com.tr için public JSON endpoint"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(FundRecord).where(FundRecord.published == 1)
+            .order_by(FundRecord.fund_code, FundRecord.date_key.desc()))
+        rows = result.scalars().all()
+        seen = set()
+        funds = []
+        for r in rows:
+            if r.fund_code in seen:
+                continue
+            seen.add(r.fund_code)
+            funds.append({
+                "code": r.fund_code,
+                "name": r.fund_name,
+                "latestDate": r.date_key,
+                "unitPrice": r.unit_price,
+                "totalValue": r.total_value,
+                "participantCount": r.participant_count,
+                "monthlyReturn": r.monthly_return,
+                "yearlyReturn": r.yearly_return,
+                "riskScore": r.risk_score,
+                "fundType": r.fund_type,
+                "stopajRate": r.stopaj_rate,
+                "valor": r.valor,
+                "aiInsights": json.loads(r.ai_insights) if r.ai_insights else [],
+                "dexterRecommendations": json.loads(r.dexter_recommendations) if r.dexter_recommendations else [],
+                "twitterSummary": r.twitter_summary,
+                "portfolioItems": json.loads(r.portfolio_items) if r.portfolio_items else [],
+            })
+    return funds
 
 @app.get("/api/funds")
 async def get_funds():

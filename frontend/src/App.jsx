@@ -313,6 +313,14 @@ export default function App() {
           onRefresh={handleRefresh}
         />
       )}
+      {/* Footer Disclaimer */}
+      <div style={{ borderTop: '1px solid #1e293b', padding: '16px 28px', marginTop: 8, textAlign: 'center' }}>
+        <p style={{ color: '#475569', fontSize: 11, lineHeight: 1.6, maxWidth: 700, margin: '0 auto' }}>
+          ⚠️ <strong style={{ color: '#64748b' }}>Sorumluluk Reddi:</strong> Bu platformda yer alan tüm bilgiler yalnızca bilgilendirme amaçlıdır. 
+          Hiçbir içerik yatırım tavsiyesi niteliği taşımaz. Geçmiş performans gelecekteki getirilerin garantisi değildir. 
+          Yatırım kararlarınızı almadan önce lisanslı bir finansal danışmana başvurunuz.
+        </p>
+      </div>
     </div>
   )
 }

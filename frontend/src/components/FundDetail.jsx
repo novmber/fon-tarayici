@@ -324,6 +324,13 @@ export default function FundDetail({ fundCode, onClose, onDeleteFund, onRefresh 
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <button onClick={() => onRefresh?.(fund.code)} style={{ background: 'rgba(0,194,168,0.1)', color: '#00C2A8', border: '1px solid rgba(0,194,168,0.2)', borderRadius: 8, padding: '6px 12px', cursor: 'pointer', fontSize: 12 }}>🔄 Güncelle</button>
+            <button onClick={async () => {
+              const isPublished = fund.published === 1
+              await fetch(`/api/funds/${fund.code}/publish?published=${isPublished ? 'false' : 'true'}`, { method: 'POST' })
+              window.location.reload()
+            }} style={{ background: fund.published === 1 ? 'rgba(0,200,100,0.15)' : 'rgba(100,100,100,0.15)', color: fund.published === 1 ? '#00C864' : '#64748b', border: `1px solid ${fund.published === 1 ? 'rgba(0,200,100,0.3)' : 'rgba(100,100,100,0.2)'}`, borderRadius: 8, padding: '6px 12px', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
+              {fund.published === 1 ? '🌐 Yayında' : '📤 Yayınla'}
+            </button>
             <button onClick={() => { if (confirm(`${fund.code} silinsin?`)) { onDeleteFund(fund.code) } }} style={{ background: 'rgba(239,71,111,0.1)', color: '#EF476F', border: '1px solid rgba(239,71,111,0.3)', borderRadius: 8, padding: '6px 12px', cursor: 'pointer', fontSize: 12 }}>Sil</button>
             <button onClick={onClose} style={{ background: '#1e293b', border: 'none', color: '#94a3b8', borderRadius: 8, width: 32, height: 32, cursor: 'pointer', fontSize: 16 }}>✕</button>
           </div>
