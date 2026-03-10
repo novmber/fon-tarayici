@@ -182,6 +182,49 @@ async def _tefas_alloc(fund_code: str, days: int = 60) -> dict:
         return {}
 
 
+
+async def _tefas_fund_info(fund_code: str) -> dict:
+    """BindFundInfo: risk skoru, stopaj, valor, fon tipi, yönetici"""
+    today = datetime.now().strftime("%d.%m.%Y")
+    script = str(Path(__file__).parent / "tefas_fetch.py")
+    try:
+        result = await asyncio.to_thread(subprocess.run,
+            ["python3", script, "BindFundInfo", fund_code, today, today],
+            capture_output=True, text=True, timeout=30)
+        if not result.stdout or result.stdout.strip().startswith("<"):
+            return {}
+        data = json.loads(result.stdout).get("data", [])
+        return data[0] if data else {}
+    except Exception as e:
+        print(f"⚠️  TEFAS fund_info ({fund_code}): {e}")
+        return {}
+
+async def _tefas_top_holdings(fund_code: str) -> list:
+    """BindHistoryAllocationTop: top 10 portföy varlığı"""
+    today = datetime.now().strftime("%d.%m.%Y")
+    start = (datetime.now() - timedelta(days=7)).strftime("%d.%m.%Y")
+    script = str(Path(__file__).parent / "tefas_fetch.py")
+    try:
+        result = await asyncio.to_thread(subprocess.run,
+            ["python3", script, "BindHistoryAllocationTop", fund_code, start, today],
+            capture_output=True, text=True, timeout=30)
+        if not result.stdout or result.stdout.strip().startswith("<"):
+            return []
+        rows = json.loads(result.stdout).get("data", [])
+        if not rows:
+            return []
+        latest = rows[-1]
+        holdings = []
+        for i in range(1, 11):
+            name = latest.get(f"VARLIKADI{i}", "")
+            weight = latest.get(f"YUZDE{i}", 0)
+            if name and float(weight or 0) > 0:
+                holdings.append({"name": name, "weight": round(float(weight), 2)})
+        return holdings
+    except Exception as e:
+        print(f"⚠️  TEFAS top_holdings ({fund_code}): {e}")
+        return []
+
 # ─── EVOLVER ───────────────────────────────────────────────────────────────────
 
 async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
@@ -259,6 +302,7 @@ async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
     }, ensure_ascii=False)
 
     today = datetime.utcnow().date()
+    today_str = today.strftime("%Y-%m-%d")
 
     # Bugün zaten snapshot var mı?
     ex = await session.execute(select(EvolverMemory).where(
@@ -313,20 +357,52 @@ async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
         # Sinyal üret
         signals = []
         curr = snapdata[-1]
-        if curr.get("sharpe_ratio", 0) >= 1.5 and sharpe_trend == "artıyor":
-            signals.append({"type": "pozitif", "msg": f"Sharpe {curr['sharpe_ratio']:.2f} ve artıyor — risk/getiri dengesi güçlü"})
-        elif curr.get("sharpe_ratio", 0) < 0:
-            signals.append({"type": "negatif", "msg": f"Sharpe negatif ({curr['sharpe_ratio']:.2f}) — getiri risksiz oranın altında"})
-        if mom_trend == "güçleniyor" and curr.get("momentum_30d", 0) > 5:
-            signals.append({"type": "pozitif", "msg": f"Momentum güçleniyor (+{curr['momentum_30d']:.1f}%) — kısa vadeli ivme artıyor"})
-        elif mom_trend == "zayıflıyor" and curr.get("momentum_30d", 0) < -3:
-            signals.append({"type": "negatif", "msg": f"Momentum zayıflıyor ({curr['momentum_30d']:.1f}%) — dikkat"})
-        if vol_trend == "artıyor" and curr.get("annual_volatility", 0) > 50:
-            signals.append({"type": "uyarı", "msg": f"Volatilite artıyor (%{curr['annual_volatility']:.1f}) — risk yükseliyor"})
+        # Sharpe bazlı sinyal
+        sharpe = curr.get("sharpe_ratio", 0) or 0
+        if sharpe >= 1.0:
+            signals.append({"type": "pozitif", "msg": f"Sharpe {sharpe:.2f} — risk/getiri dengesi iyi"})
+        elif sharpe < 0:
+            signals.append({"type": "negatif", "msg": f"Sharpe negatif ({sharpe:.2f}) — getiri risksiz oranın altında"})
+        else:
+            signals.append({"type": "uyarı", "msg": f"Sharpe {sharpe:.2f} — orta düzey risk/getiri dengesi"})
+
+        # Momentum sinyali
+        mom = curr.get("momentum_30d", 0) or 0
+        if mom > 5:
+            signals.append({"type": "pozitif", "msg": f"Momentum +{mom:.1f}% — güçlü kısa vadeli ivme"})
+        elif mom < -5:
+            signals.append({"type": "negatif", "msg": f"Momentum {mom:.1f}% — zayıf kısa vadeli ivme"})
+
+        # Volatilite sinyali
+        vol = curr.get("annual_volatility", 0) or 0
+        if vol > 80:
+            signals.append({"type": "uyarı", "msg": f"Yıllık volatilite %{vol:.1f} — yüksek risk"})
+        elif vol < 20:
+            signals.append({"type": "pozitif", "msg": f"Yıllık volatilite %{vol:.1f} — düşük risk"})
+
+        # Drawdown sinyali
+        dd = curr.get("max_drawdown", 0) or 0
+        if dd < -30:
+            signals.append({"type": "negatif", "msg": f"Max drawdown %{dd:.1f} — tarihi kayıp yüksek"})
+        elif dd > -10:
+            signals.append({"type": "pozitif", "msg": f"Max drawdown %{dd:.1f} — kayıp kontrol altında"})
+
+        # Pozitif gün
+        pos_days = curr.get("positive_days_pct", 0) or 0
+        if pos_days > 55:
+            signals.append({"type": "pozitif", "msg": f"Pozitif gün oranı %{pos_days:.1f} — tutarlı getiri"})
+        elif pos_days < 40:
+            signals.append({"type": "uyarı", "msg": f"Pozitif gün oranı %{pos_days:.1f} — dalgalı seyir"})
+
+        # Trend sinyalleri
+        if sharpe_trend == "artıyor":
+            signals.append({"type": "pozitif", "msg": "Sharpe trendi yukarı — risk/getiri dengesi iyileşiyor"})
+        if mom_trend == "güçleniyor":
+            signals.append({"type": "pozitif", "msg": "Momentum güçleniyor — ivme artıyor"})
+        if vol_trend == "artıyor":
+            signals.append({"type": "uyarı", "msg": "Volatilite tırmanıyor — dikkatli olun"})
         if dd_trend == "iyileşiyor":
-            signals.append({"type": "pozitif", "msg": f"Max drawdown iyileşiyor (%{curr['max_drawdown']:.1f}) — toparlanma sinyali"})
-        if curr.get("positive_days_pct", 0) > 55:
-            signals.append({"type": "pozitif", "msg": f"Pozitif gün oranı yüksek (%{curr['positive_days_pct']:.1f}) — tutarlı getiri"})
+            signals.append({"type": "pozitif", "msg": "Drawdown iyileşiyor — toparlanma sinyali"})
 
         signal_content = json.dumps({
             "sharpe_trend": sharpe_trend,
@@ -358,6 +434,7 @@ async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
                 confidence=0.5,
                 snapshot_date=today,
             ))
+    await session.commit()
 
 
 # ─── CLAUDE ────────────────────────────────────────────────────────────────────
@@ -442,6 +519,83 @@ JSON (başka hiçbir şey yazma):
     return json.loads(text.strip().rstrip("```").strip())
 
 
+
+async def _analyze_tefas(fund_code: str, fund_info: dict, evolver: dict, history: list, top_holdings: list) -> dict:
+    """PDF olmadan sadece TEFAS + Evolver verisiyle Claude analizi"""
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise HTTPException(500, "ANTHROPIC_API_KEY bulunamadı")
+
+    # Fiyat istatistikleri
+    prices = [r["unit_price"] for r in history if r.get("unit_price", 0) > 0]
+    total_return = round((prices[-1] - prices[0]) / prices[0] * 100, 2) if len(prices) >= 2 else 0
+    recent_prices = prices[-30:] if len(prices) >= 30 else prices
+    monthly_return = round((recent_prices[-1] - recent_prices[0]) / recent_prices[0] * 100, 2) if len(recent_prices) >= 2 else 0
+
+    # Evolver sinyalleri
+    ev_signals = evolver.get("signals", [])
+    ev_str = ""
+    if evolver:
+        ev_str = f"""
+EVOLVER ANALİZİ:
+- Sharpe: {evolver.get("last_sharpe", "?")} ({evolver.get("sharpe_trend", "?")})
+- Momentum: {evolver.get("last_momentum", "?")}% ({evolver.get("momentum_trend", "?")})
+- Volatilite: {evolver.get("last_vol", "?")}% ({evolver.get("volatility_trend", "?")})
+- Drawdown trendi: {evolver.get("drawdown_trend", "?")}
+- Sinyaller: {", ".join([s["msg"] for s in ev_signals[:5]])}"""
+
+    # Top holdings
+    holdings_str = ""
+    if top_holdings:
+        holdings_str = "\nTOP VARLIKLAR: " + ", ".join([f'{h["name"]} %{h["weight"]}' for h in top_holdings[:5]])
+
+    # Portföy dağılımı
+    alloc_str = ""
+    if fund_info.get("portfolioItems"):
+        items = fund_info["portfolioItems"]
+        alloc_str = "\nPORTFÖY DAĞILIMI: " + ", ".join([f'{i["name"]} %{i["value"]}' for i in items[:5]])
+
+    from datetime import datetime
+    months_tr = {1:'Ocak',2:'Şubat',3:'Mart',4:'Nisan',5:'Mayıs',6:'Haziran',
+                 7:'Temmuz',8:'Ağustos',9:'Eylül',10:'Ekim',11:'Kasım',12:'Aralık'}
+    now = datetime.now()
+    current_month_str = f"{months_tr[now.month]} {now.year}"
+
+    prompt = f"""Türk yatırım fonu analizi. SADECE JSON döndür.
+
+FON: {fund_code} - {fund_info.get("name", "")}
+TİP: {fund_info.get("fundType", "?")} | RİSK: {fund_info.get("riskScore", "?")}/7
+GÜNCEL FİYAT: {prices[-1] if prices else "?"} TL
+PORTFÖY: ₺{round(fund_info.get("totalValue", 0)/1e9, 2)}B | {int(fund_info.get("participantCount", 0)):,} yatırımcı
+AYLIK GETİRİ: %{monthly_return} | TOPLAM GETİRİ ({len(prices)} gün): %{total_return}
+STOPAJ: %{fund_info.get("stopajRate", 17.5)} | VALÖR: {fund_info.get("valor", "T+1/T+2")}
+{holdings_str}{alloc_str}{ev_str}
+
+JSON formatı:
+{{"aiInsights": ["Tespit 1", "Tespit 2", "Tespit 3", "Tespit 4", "Tespit 5"],
+  "dexterRecommendations": ["Öneri 1", "Öneri 2", "Öneri 3"],
+  "twitterSummary": "📊 KOD | FON ADI KISA\n━━━━━━━━━━━━━━\n🚀 Aylık: +X.XX% | Toplam (NNN gün): +XXX.XX%\n💼 Portföy: ₺XXXm | XXX yatırımcı\n⚠️ Risk: X/7 · Düşük/Orta/Yüksek · Sharpe: X.XX\n\n🔍 Öne Çıkanlar:\n• Gerçek portföy/performans tespiti 1\n• Gerçek portföy/performans tespiti 2\n• Gerçek portföy/performans tespiti 3\n\n📅 {current_month_str} · TEFAS Verisi\n#YatırımFonu #TEFAS #Fon"}}}}
+
+Kurallar:
+- aiInsights: Fon hakkında veriye dayalı 5 somut tespit (getiri, risk, volatilite, portföy yapısı, yatırımcı kitlesi)
+- dexterRecommendations: 3 actionable yatırım önerisi (al/sat/bekle değil, strateji bazlı)
+- twitterSummary: Yukarıdaki formatı kullan, gerçek sayılarla doldur. Tarih olarak {current_month_str} yaz, başka tarih yazma. Öne çıkanlar kısmında: 1. en büyük top holding varlık adı ve ağırlığı, 2. sharpe oranı ve trendi, 3. momentum veya volatilite yorumu. Genel laflar YAZMA. 280 karakter altında tut.
+- Türkçe yaz, sayısal verilere dayan, genel laflar etme"""
+
+    client = anthropic.Anthropic(api_key=api_key)
+    loop = asyncio.get_running_loop()
+    resp = await loop.run_in_executor(None, lambda: client.messages.create(
+        model="claude-sonnet-4-20250514", max_tokens=1000,
+        messages=[{"role": "user", "content": prompt}]
+    ))
+    text = resp.content[0].text.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+    return json.loads(text.strip().rstrip("```").strip())
+
+
 # ─── API ROUTES ────────────────────────────────────────────────────────────────
 
 @app.post("/api/funds/track")
@@ -456,6 +610,8 @@ async def track_fund(payload: dict = Body(...)):
         raise HTTPException(404, f"TEFAS'ta {fund_code} bulunamadı")
 
     alloc = await _tefas_alloc(fund_code, days=60)
+    fund_info = await _tefas_fund_info(fund_code)
+    top_holdings = await _tefas_top_holdings(fund_code)
     fund_name = rows[0].get("FONUNVAN", fund_code)
 
     async with AsyncSessionLocal() as session:
@@ -481,11 +637,31 @@ async def track_fund(payload: dict = Body(...)):
                 participant_count=float(row.get("KISISAYISI", 0)),
                 share_count=float(row.get("TEDPAYSAYISI", 0)),
                 portfolio_items=json.dumps(alloc.get(d, []), ensure_ascii=False),
+                risk_score=int(fund_info.get("RISKDEGERI", 0) or 0) or None,
+                stopaj_rate=float(fund_info.get("STOPAJORAN", 0) or 0) or None,
+                valor=fund_info.get("VALÖR") or fund_info.get("VALOR"),
+                fund_type=fund_info.get("FONTUR"),
+                top_holdings=json.dumps(top_holdings, ensure_ascii=False),
             ))
             new_count += 1
+        if fund_info:
+            from sqlalchemy import update
+            await session.execute(update(FundRecord).where(FundRecord.fund_code == fund_code).values(
+                risk_score=int(fund_info.get("RISKDEGERI", 0) or 0) or None,
+                stopaj_rate=float(fund_info.get("STOPAJORAN", 0) or 0) or None,
+                valor=fund_info.get("VALÖR") or fund_info.get("VALOR"),
+                fund_type=fund_info.get("FONTUR"),
+                top_holdings=json.dumps(top_holdings, ensure_ascii=False),
+            ))
 
         await session.commit()
-        await _update_evolver(session, fund_code, all_rows)
+        # Tüm geçmiş kayıtları çek — evolver için
+        from sqlalchemy import text as sa_text
+        all_records = await session.execute(
+            sa_text("SELECT date_key, unit_price, total_value FROM fund_records WHERE fund_code=:code ORDER BY date_key"),
+            {"code": fund_code})
+        all_rows_full = [{"date_key": r[0], "unit_price": r[1], "total_value": r[2]} for r in all_records.fetchall()]
+        await _update_evolver(session, fund_code, all_rows_full)
         await session.commit()
 
     return {"success": True, "fundCode": fund_code, "fundName": fund_name,
@@ -500,6 +676,8 @@ async def refresh_fund(fund_code: str):
     if not rows:
         raise HTTPException(404, "TEFAS'tan veri alınamadı")
     alloc = await _tefas_alloc(fund_code, days=10)
+    fund_info = await _tefas_fund_info(fund_code)
+    top_holdings = await _tefas_top_holdings(fund_code)
     fund_name = rows[0].get("FONUNVAN", fund_code)
     async with AsyncSessionLocal() as session:
         existing = set(r[0] for r in (await session.execute(
@@ -518,10 +696,111 @@ async def refresh_fund(fund_code: str):
                 participant_count=float(row.get("KISISAYISI", 0)),
                 share_count=float(row.get("TEDPAYSAYISI", 0)),
                 portfolio_items=json.dumps(alloc.get(d, []), ensure_ascii=False),
+                risk_score=int(fund_info.get("RISKDEGERI", 0) or 0) or None,
+                stopaj_rate=float(fund_info.get("STOPAJORAN", 0) or 0) or None,
+                valor=fund_info.get("VALÖR") or fund_info.get("VALOR"),
+                fund_type=fund_info.get("FONTUR"),
+                top_holdings=json.dumps(top_holdings, ensure_ascii=False),
             ))
             new_count += 1
+        from sqlalchemy import update
+        # Mevcut en iyi değerleri bul (eski kayıtlardan)
+        existing_meta = (await session.execute(
+            select(FundRecord).where(
+                FundRecord.fund_code == fund_code,
+                FundRecord.risk_score != None
+            ).order_by(desc(FundRecord.date_key)).limit(1)
+        )).scalar_one_or_none()
+        update_vals = {}
+        if fund_info:
+            update_vals = {
+                "risk_score": int(fund_info.get("RISKDEGERI", 0) or 0) or None,
+                "stopaj_rate": float(fund_info.get("STOPAJORAN", 0) or 0) or None,
+                "valor": fund_info.get("VALÖR") or fund_info.get("VALOR"),
+                "fund_type": fund_info.get("FONTUR"),
+            }
+        elif existing_meta:
+            update_vals = {
+                "risk_score": existing_meta.risk_score,
+                "stopaj_rate": existing_meta.stopaj_rate,
+                "valor": existing_meta.valor,
+                "fund_type": existing_meta.fund_type,
+            }
+        if top_holdings:
+            update_vals["top_holdings"] = json.dumps(top_holdings, ensure_ascii=False)
+        elif existing_meta and existing_meta.top_holdings:
+            update_vals["top_holdings"] = existing_meta.top_holdings
+        if update_vals:
+            await session.execute(update(FundRecord).where(FundRecord.fund_code == fund_code).values(**update_vals))
         await session.commit()
+        all_rows_full = (await session.execute(
+            select(FundRecord).where(FundRecord.fund_code == fund_code).order_by(FundRecord.date_key)
+        )).scalars().all()
+        all_rows_dict = [{"unit_price": r.unit_price, "date_key": r.date_key} for r in all_rows_full]
+        await _update_evolver(session, fund_code, all_rows_dict)
     return {"success": True, "fundCode": fund_code, "newRows": new_count}
+
+
+
+@app.post("/api/funds/{fund_code}/analyze-tefas")
+async def analyze_tefas(fund_code: str):
+    """PDF olmadan TEFAS + Evolver verisiyle Claude analizi"""
+    fund_code = fund_code.upper()
+    async with AsyncSessionLocal() as session:
+        # En son kayıt
+        latest = (await session.execute(
+            select(FundRecord).where(FundRecord.fund_code == fund_code)
+            .order_by(desc(FundRecord.date_key)).limit(1)
+        )).scalar_one_or_none()
+        if not latest:
+            raise HTTPException(404, f"{fund_code} bulunamadı")
+
+        # Fiyat geçmişi
+        history_records = (await session.execute(
+            select(FundRecord).where(FundRecord.fund_code == fund_code)
+            .order_by(FundRecord.date_key)
+        )).scalars().all()
+        history = [{"date_key": r.date_key, "unit_price": r.unit_price, "total_value": r.total_value}
+                   for r in history_records]
+
+        # Evolver sinyali
+        evolver_rec = (await session.execute(
+            select(EvolverMemory).where(
+                EvolverMemory.fund_code == fund_code,
+                EvolverMemory.memory_type == "signal"
+            )
+        )).scalar_one_or_none()
+        evolver = json.loads(evolver_rec.content) if evolver_rec else {}
+
+        # Fon bilgileri
+        fund_info = {
+            "name": latest.fund_name,
+            "fundType": latest.fund_type,
+            "riskScore": latest.risk_score,
+            "totalValue": latest.total_value,
+            "participantCount": latest.participant_count,
+            "stopajRate": latest.stopaj_rate,
+            "valor": latest.valor,
+            "portfolioItems": json.loads(latest.portfolio_items or "[]"),
+        }
+        top_holdings = json.loads(latest.top_holdings or "[]")
+
+        # Claude analizi
+        ai = await _analyze_tefas(fund_code, fund_info, evolver, history, top_holdings)
+
+        # Tüm kayıtlara yaz
+        from sqlalchemy import update
+        await session.execute(update(FundRecord).where(FundRecord.fund_code == fund_code).values(
+            ai_insights=json.dumps(ai.get("aiInsights", []), ensure_ascii=False),
+            dexter_recommendations=json.dumps(ai.get("dexterRecommendations", []), ensure_ascii=False),
+            twitter_summary=ai.get("twitterSummary", ""),
+            has_pdf_analysis=1,
+        ))
+        await session.commit()
+
+    return {"success": True, "fundCode": fund_code,
+            "aiInsights": ai.get("aiInsights", []),
+            "dexterRecommendations": ai.get("dexterRecommendations", [])}
 
 
 @app.post("/api/funds/{fund_code}/analyze-pdf")

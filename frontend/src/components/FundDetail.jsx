@@ -74,9 +74,21 @@ function PortfolioChart({ items }) {
   )
 }
 
-function TwitterPanel({ text, fund, latest }) {
+function TwitterPanel({ text, fund, latest, onAnalyze }) {
   const [copied, setCopied] = useState(false)
-  if (!text) return <div style={{ color: '#475569', fontSize: 13, padding: 24, textAlign: 'center' }}>PDF analizi yüklendikten sonra AI tweet üretilir.</div>
+  const [generating, setGenerating] = useState(false)
+  if (!text) return (
+    <div style={{ textAlign: 'center', padding: 32 }}>
+      <p style={{ color: '#475569', fontSize: 13, marginBottom: 16 }}>Henüz tweet metni yok. TEFAS verisiyle otomatik üretilebilir.</p>
+      <button onClick={async () => {
+        setGenerating(true)
+        await onAnalyze?.()
+        setGenerating(false)
+      }} disabled={generating} style={{ background: 'rgba(29,155,240,0.15)', color: '#1d9bf0', border: '1px solid rgba(29,155,240,0.3)', borderRadius: 20, padding: '10px 22px', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+        {generating ? '⏳ Üretiliyor...' : '𝕏 Tweet Metni Üret'}
+      </button>
+    </div>
+  )
   return (
     <div style={{ maxWidth: 520 }}>
       {/* Kullanım rehberi */}
@@ -88,8 +100,8 @@ function TwitterPanel({ text, fund, latest }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
           <div style={{ width: 40, height: 40, borderRadius: '50%', background: 'linear-gradient(135deg,#00C2A8,#118AB2)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>📊</div>
           <div>
-            <div style={{ color: '#f1f5f9', fontWeight: 700, fontSize: 14 }}>Fon Tarayıcı</div>
-            <div style={{ color: '#64748b', fontSize: 12 }}>@FonTarayici</div>
+            <div style={{ color: "#f1f5f9", fontWeight: 700, fontSize: 14 }}>GridBotman</div>
+            <div style={{ color: '#64748b', fontSize: 12 }}>@GridBotman</div>
           </div>
         </div>
         <pre style={{ color: '#e7e9ea', fontSize: 14, lineHeight: 1.7, whiteSpace: 'pre-wrap', margin: 0, fontFamily: 'system-ui' }}>{text}</pre>
@@ -277,6 +289,15 @@ export default function FundDetail({ fundCode, onClose, onDeleteFund, onRefresh 
     getFund(fundCode).then(f => { setFund(f); setLoading(false) })
   }, [fundCode])
 
+  const [refreshing, setRefreshing] = useState(false)
+  const [analyzing, setAnalyzing] = useState(false)
+  const handleRefresh = async () => {
+    setRefreshing(true)
+    await onRefresh?.(fundCode)
+    const f = await getFund(fundCode)
+    setFund(f)
+    setRefreshing(false)
+  }
   if (loading) return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(2,8,23,0.93)', zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div style={{ color: '#00C2A8', fontSize: 16 }}>⏳ Yükleniyor...</div>
@@ -323,7 +344,7 @@ export default function FundDetail({ fundCode, onClose, onDeleteFund, onRefresh 
             <p style={{ margin: 0, color: '#64748b', fontSize: 12 }}>Son güncelleme: {fund.latestDate}</p>
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <button onClick={() => onRefresh?.(fund.code)} style={{ background: 'rgba(0,194,168,0.1)', color: '#00C2A8', border: '1px solid rgba(0,194,168,0.2)', borderRadius: 8, padding: '6px 12px', cursor: 'pointer', fontSize: 12 }}>🔄 Güncelle</button>
+            <button onClick={handleRefresh} disabled={refreshing} style={{ background: 'rgba(0,194,168,0.1)', color: '#00C2A8', border: '1px solid rgba(0,194,168,0.2)', borderRadius: 8, padding: '6px 12px', cursor: 'pointer', fontSize: 12 }}>{refreshing ? '⏳ Güncelleniyor...' : '🔄 Güncelle'}</button>
             <button onClick={async () => {
               const isPublished = fund.published === 1
               await fetch(`/api/funds/${fund.code}/publish?published=${isPublished ? 'false' : 'true'}`, { method: 'POST' })
@@ -407,11 +428,24 @@ export default function FundDetail({ fundCode, onClose, onDeleteFund, onRefresh 
 
           {tab === 'dexter' && (
             <div>
-              {!fund.hasPdfAnalysis && (
-                <div style={{ background: 'rgba(255,209,102,0.08)', border: '1px solid rgba(255,209,102,0.2)', borderRadius: 10, padding: '12px 16px', marginBottom: 16, color: '#FFD166', fontSize: 13 }}>
-                  💡 PDF analizi yüklendikten sonra Dexter önerileri oluşturulur. "Fon Ekle" panelinden bu fonun KAP PDF'ini yükleyin.
-                </div>
-              )}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+                <button
+                  onClick={async () => {
+                    setAnalyzing(true)
+                    try {
+                      const res = await fetch(`/api/funds/${fund.code}/analyze-tefas`, { method: 'POST' })
+                      const data = await res.json()
+                      const f = await getFund(fund.code)
+                      setFund(f)
+                    } catch(e) { console.error(e) }
+                    setAnalyzing(false)
+                  }}
+                  disabled={analyzing}
+                  style={{ background: 'rgba(0,194,168,0.1)', color: '#00C2A8', border: '1px solid rgba(0,194,168,0.3)', borderRadius: 8, padding: '7px 14px', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}
+                >
+                  {analyzing ? '⏳ Analiz ediliyor...' : '🤖 TEFAS ile Analiz Et'}
+                </button>
+              </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                 <div style={{ background: '#1e293b', borderRadius: 12, padding: 16 }}>
                   <p style={{ color: '#00C2A8', fontSize: 13, fontWeight: 600, margin: '0 0 12px' }}>🧠 AI Tespitleri</p>
@@ -439,7 +473,7 @@ export default function FundDetail({ fundCode, onClose, onDeleteFund, onRefresh 
 
           {tab === 'twitter' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-              <TwitterPanel text={fund.twitterSummary} fund={fund} latest={latest} />
+              <TwitterPanel text={fund.twitterSummary} fund={fund} latest={latest} onAnalyze={async () => { setAnalyzing(true); try { await fetch(`/api/funds/${fund.code}/analyze-tefas`, { method: "POST" }); const f = await getFund(fund.code); setFund(f); } catch(e) { console.error(e) } setAnalyzing(false); }} />
             </div>
           )}
         </div>
