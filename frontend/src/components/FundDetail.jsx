@@ -298,6 +298,49 @@ function EvolverPanel({ fundCode }) {
   )
 }
 
+
+function RiskScoreInput({ fundCode, onSaved }) {
+  const [editing, setEditing] = React.useState(false)
+  const [val, setVal] = React.useState('')
+  const [saving, setSaving] = React.useState(false)
+
+  const save = async () => {
+    const r = parseInt(val)
+    if (!r || r < 1 || r > 7) return
+    setSaving(true)
+    try {
+      await fetch(`/api/funds/${fundCode}/set-risk`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ risk_score: r })
+      })
+      onSaved(r)
+      setEditing(false)
+    } catch(e) { console.error(e) }
+    setSaving(false)
+  }
+
+  if (!editing) return (
+    <div onClick={() => setEditing(true)} style={{ color: '#64748b', fontWeight: 700, fontSize: 14, marginTop: 3, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
+      <span>—</span><span style={{ fontSize: 10, color: '#475569' }}>✏️ gir</span>
+    </div>
+  )
+
+  return (
+    <div style={{ display: 'flex', gap: 4, marginTop: 3 }}>
+      <input type="number" min="1" max="7" value={val} onChange={e => setVal(e.target.value)}
+        style={{ width: 40, background: '#0f172a', border: '1px solid #334155', color: '#f1f5f9', borderRadius: 4, padding: '2px 4px', fontSize: 13 }}
+        autoFocus placeholder="1-7" />
+      <button onClick={save} disabled={saving}
+        style={{ background: '#10b981', border: 'none', color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 12, cursor: 'pointer' }}>
+        {saving ? '...' : '✓'}
+      </button>
+      <button onClick={() => setEditing(false)}
+        style={{ background: '#334155', border: 'none', color: '#94a3b8', borderRadius: 4, padding: '2px 6px', fontSize: 12, cursor: 'pointer' }}>✕</button>
+    </div>
+  )
+}
+
 export default function FundDetail({ fundCode, onClose, onDeleteFund, onRefresh }) {
   const [fund, setFund] = useState(null)
   const [tab, setTab] = useState('trend')
