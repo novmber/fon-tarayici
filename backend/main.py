@@ -918,7 +918,7 @@ async def analyze_pdf(fund_code: str, file: UploadFile = File(...)):
 @app.on_event("startup")
 async def startup_event():
     async def nightly_refresh():
-        print("🔄 Gece otomatik refresh başladı...")
+        print("🔄 11:30 otomatik güncelleme başladı...")
         async with AsyncSessionLocal() as session:
             result = await session.execute(select(FundRecord.fund_code).distinct())
             codes = [r[0] for r in result.fetchall()]
@@ -926,16 +926,16 @@ async def startup_event():
             try:
                 import httpx
                 async with httpx.AsyncClient() as client:
-                    r = await client.post(f"http://localhost:9009/api/funds/{code}/refresh", timeout=60)
-                print(f"  ✅ {code} güncellendi")
+                    await client.post(f"http://localhost:9009/api/funds/{code}/refresh", timeout=60)
+                    print(f"  ✅ {code} fiyat güncellendi")
+                    await client.post(f"http://localhost:9009/api/funds/{code}/analyze-tefas", timeout=120)
+                    print(f"  🤖 {code} analiz tamamlandı")
             except Exception as e:
                 print(f"  ❌ {code} hata: {e}")
-        print(f"🔄 Tamamlandı. {len(codes)} fon güncellendi.")
-
+        print(f"✅ Tamamlandı. {len(codes)} fon güncellendi ve analiz edildi.")
     scheduler.add_job(nightly_refresh, CronTrigger(hour=11, minute=30), id="nightly_refresh", replace_existing=True)
     scheduler.start()
-    print("⏰ Scheduler başlatıldı (her gece 03:00)")
-
+    print("⏰ Scheduler başlatıldı (her gün 11:30)")
 @app.on_event("shutdown")
 async def shutdown_event():
     scheduler.shutdown()
