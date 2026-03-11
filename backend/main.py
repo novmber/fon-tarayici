@@ -92,7 +92,27 @@ async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     print("✅ Database hazır:", DB_PATH)
-    loop = asyncio.get_running_loop()
+
+    async def nightly_refresh():
+        print("🔄 11:30 otomatik güncelleme başladı...")
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(FundRecord.fund_code).distinct())
+            codes = [r[0] for r in result.fetchall()]
+        for code in codes:
+            try:
+                import httpx
+                async with httpx.AsyncClient() as client:
+                    await client.post(f"http://localhost:9009/api/funds/{code}/refresh", timeout=60)
+                    print(f"  ✅ {code} fiyat güncellendi")
+                    await client.post(f"http://localhost:9009/api/funds/{code}/analyze-tefas", timeout=120)
+                    print(f"  🤖 {code} analiz tamamlandı")
+            except Exception as e:
+                print(f"  ❌ {code} hata: {e}")
+        print(f"✅ Tamamlandı. {len(codes)} fon güncellendi ve analiz edildi.")
+
+    scheduler.add_job(nightly_refresh, CronTrigger(hour=11, minute=30), id="nightly_refresh", replace_existing=True)
+    scheduler.start()
+    print("⏰ Scheduler başlatıldı (her gün 11:30)")
 
 
 # ─── TEFAS ─────────────────────────────────────────────────────────────────────
@@ -610,7 +630,68 @@ KURALLAR:
         response_format={"type": "json_object"},
     ))
     text = resp.choices[0].message.content.strip()
-    return json.loads(text)
+    ai = json.loads(text)
+
+    # Tweet metnini Python'da oluştur — Groq'a bırakma
+    fund_name_short = fund_info.get("name", fund_code)[:40]
+    tv = fund_info.get("totalValue", 0) or 0
+    tv_str = f"₺{tv/1e9:.2f}B" if tv >= 1e9 else f"₺{tv/1e6:.0f}M"
+    pc = int(fund_info.get("participantCount", 0) or 0)
+    risk = fund_info.get("riskScore", "?")
+    risk_label = {"1":"Çok Düşük","2":"Düşük","3":"Orta-Düşük","4":"Orta","5":"Orta-Yüksek","6":"Yüksek","7":"Çok Yüksek"}.get(str(risk), "?")
+    sharpe = evolver.get("last_sharpe", "?")
+    # Evolver'dan sharpe al
+    sharpe = "?"
+    if evolver:
+        sharpe = evolver.get("last_sharpe", "?")
+    else:
+        # price_pattern memory'den al
+        pass
+    # Öne çıkanlar: kısa ve veri bazlı, Python'da üret
+    highlights = []
+    # 1. En büyük portföy kalemi
+    items = fund_info.get("portfolioItems", [])
+    if items:
+        top_item = max(items, key=lambda x: x.get("value", 0))
+        highlights.append(f'{top_item["name"]} %{top_item["value"]:.1f} ile en büyük kalem')
+    # 2. Sharpe yorumu
+    if sharpe != "?" and sharpe is not None:
+        try:
+            s = float(sharpe)
+            if s >= 2:
+                highlights.append(f"Sharpe {s:.2f} — risk/getiri dengesi güçlü")
+            elif s >= 1:
+                highlights.append(f"Sharpe {s:.2f} — risk/getiri dengesi iyi")
+            else:
+                highlights.append(f"Sharpe {s:.2f} — orta düzey risk/getiri")
+        except: pass
+    # 3. Aylık vs 6 aylık karşılaştırma
+    if avg_6m_monthly is not None:
+        if monthly_return > avg_6m_monthly:
+            highlights.append(f"Aylık %{monthly_return} → 6a ort. %{avg_6m_monthly}'nin üzerinde")
+        else:
+            highlights.append(f"Aylık %{monthly_return} → 6a ort. %{avg_6m_monthly}'nin altında")
+    # Yedek: aiInsights'tan kısa al
+    if len(highlights) < 3:
+        for ins in ai.get("aiInsights", []):
+            if len(highlights) >= 3: break
+            short = ins[:55] + ("…" if len(ins) > 55 else "")
+            highlights.append(short)
+    bullet_str = "\n".join(["• " + h for h in highlights])
+    monthly_sign = "+" if monthly_return >= 0 else ""
+    total_sign = "+" if total_return >= 0 else ""
+    twitter_summary = (
+        "📊 " + fund_code + " | " + fund_name_short + "\n"
+        "━━━━━━━━━━━━━━\n"
+        "🚀 Aylık: " + monthly_sign + str(monthly_return) + "% | Toplam (" + str(len(prices)) + "g): " + total_sign + str(total_return) + "%\n"
+        "💼 Portföy: " + tv_str + " | " + f"{pc:,}".replace(",", ".") + " yatırımcı\n"
+        "⚠️ Risk: " + str(risk) + "/7 · " + risk_label + " · Sharpe: " + str(sharpe) + "\n"
+        "\n🔍 Öne Çıkanlar:\n" + bullet_str + "\n"
+        "\n📅 " + current_month_str + " · TEFAS\n"
+        "#YatırımFonu #TEFAS #" + fund_code
+    )
+    ai["twitterSummary"] = twitter_summary
+    return ai
 
 
 # ─── API ROUTES ────────────────────────────────────────────────────────────────
@@ -807,6 +888,25 @@ async def analyze_tefas(fund_code: str):
         )).scalar_one_or_none()
         evolver = json.loads(evolver_rec.content) if evolver_rec else {}
 
+        # signal yoksa price_pattern'den sharpe al
+        if not evolver:
+            pattern_rec = (await session.execute(
+                select(EvolverMemory).where(
+                    EvolverMemory.fund_code == fund_code,
+                    EvolverMemory.memory_type == "price_pattern"
+                ).order_by(EvolverMemory.last_seen.desc()).limit(1)
+            )).scalar_one_or_none()
+            if pattern_rec:
+                p = json.loads(pattern_rec.content)
+                evolver = {
+                    "last_sharpe": p.get("sharpe_ratio"),
+                    "last_momentum": p.get("momentum_30d"),
+                    "last_vol": p.get("annual_volatility"),
+                    "sharpe_trend": "?", "momentum_trend": "?",
+                    "volatility_trend": "?", "drawdown_trend": "?",
+                    "signals": []
+                }
+
         # Fon bilgileri
         fund_info = {
             "name": latest.fund_name,
@@ -835,7 +935,8 @@ async def analyze_tefas(fund_code: str):
 
     return {"success": True, "fundCode": fund_code,
             "aiInsights": ai.get("aiInsights", []),
-            "dexterRecommendations": ai.get("dexterRecommendations", [])}
+            "dexterRecommendations": ai.get("dexterRecommendations", []),
+            "twitterSummary": ai.get("twitterSummary", "")}
 
 
 @app.post("/api/funds/{fund_code}/analyze-pdf")
@@ -914,28 +1015,6 @@ async def analyze_pdf(fund_code: str, file: UploadFile = File(...)):
 
     return {"success": True, "fundCode": fund_code, "month": ai.get("month"), "monthKey": month_key}
 
-
-@app.on_event("startup")
-async def startup_event():
-    async def nightly_refresh():
-        print("🔄 11:30 otomatik güncelleme başladı...")
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(select(FundRecord.fund_code).distinct())
-            codes = [r[0] for r in result.fetchall()]
-        for code in codes:
-            try:
-                import httpx
-                async with httpx.AsyncClient() as client:
-                    await client.post(f"http://localhost:9009/api/funds/{code}/refresh", timeout=60)
-                    print(f"  ✅ {code} fiyat güncellendi")
-                    await client.post(f"http://localhost:9009/api/funds/{code}/analyze-tefas", timeout=120)
-                    print(f"  🤖 {code} analiz tamamlandı")
-            except Exception as e:
-                print(f"  ❌ {code} hata: {e}")
-        print(f"✅ Tamamlandı. {len(codes)} fon güncellendi ve analiz edildi.")
-    scheduler.add_job(nightly_refresh, CronTrigger(hour=11, minute=30), id="nightly_refresh", replace_existing=True)
-    scheduler.start()
-    print("⏰ Scheduler başlatıldı (her gün 11:30)")
 @app.on_event("shutdown")
 async def shutdown_event():
     scheduler.shutdown()
