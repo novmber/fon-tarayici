@@ -521,79 +521,96 @@ JSON (başka hiçbir şey yazma):
 
 
 async def _analyze_tefas(fund_code: str, fund_info: dict, evolver: dict, history: list, top_holdings: list) -> dict:
-    """PDF olmadan sadece TEFAS + Evolver verisiyle Claude analizi"""
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    """TEFAS + Evolver verisiyle Groq/Llama analizi"""
+    from groq import Groq
+    api_key = os.getenv("GROQ_API_KEY", "")
     if not api_key:
-        raise HTTPException(500, "ANTHROPIC_API_KEY bulunamadı")
+        raise HTTPException(500, "GROQ_API_KEY bulunamadı")
 
-    # Fiyat istatistikleri
     prices = [r["unit_price"] for r in history if r.get("unit_price", 0) > 0]
     total_return = round((prices[-1] - prices[0]) / prices[0] * 100, 2) if len(prices) >= 2 else 0
     recent_prices = prices[-30:] if len(prices) >= 30 else prices
     monthly_return = round((recent_prices[-1] - recent_prices[0]) / recent_prices[0] * 100, 2) if len(recent_prices) >= 2 else 0
 
-    # Evolver sinyalleri
+    # 6 aylık ortalama aylık getiri
+    monthly_returns = []
+    if len(prices) >= 60:
+        for i in range(6):
+            end_i = len(prices) - i * 30
+            start_i = end_i - 30
+            if start_i >= 0:
+                r = round((prices[end_i-1] - prices[start_i]) / prices[start_i] * 100, 2)
+                monthly_returns.append(r)
+    avg_6m_monthly = round(sum(monthly_returns) / len(monthly_returns), 2) if monthly_returns else None
+
     ev_signals = evolver.get("signals", [])
     ev_str = ""
     if evolver:
         ev_str = f"""
-EVOLVER ANALİZİ:
-- Sharpe: {evolver.get("last_sharpe", "?")} ({evolver.get("sharpe_trend", "?")})
-- Momentum: {evolver.get("last_momentum", "?")}% ({evolver.get("momentum_trend", "?")})
-- Volatilite: {evolver.get("last_vol", "?")}% ({evolver.get("volatility_trend", "?")})
-- Drawdown trendi: {evolver.get("drawdown_trend", "?")}
-- Sinyaller: {", ".join([s["msg"] for s in ev_signals[:5]])}"""
+EVOLVER: Sharpe={evolver.get("last_sharpe","?")} ({evolver.get("sharpe_trend","?")}), Momentum={evolver.get("last_momentum","?")}% ({evolver.get("momentum_trend","?")}), Yıllık Volatilite={evolver.get("last_vol","?")}%, Drawdown trendi={evolver.get("drawdown_trend","?")}
+Sinyaller: {", ".join([s["msg"] for s in ev_signals[:5]])}"""
 
-    # Top holdings
     holdings_str = ""
     if top_holdings:
-        holdings_str = "\nTOP VARLIKLAR: " + ", ".join([f'{h["name"]} %{h["weight"]}' for h in top_holdings[:5]])
+        holdings_str = "\nTOP VARLIKLAR: " + ", ".join([h["name"] + " %" + str(h["weight"]) for h in top_holdings[:5]])
 
-    # Portföy dağılımı
     alloc_str = ""
     if fund_info.get("portfolioItems"):
         items = fund_info["portfolioItems"]
-        alloc_str = "\nPORTFÖY DAĞILIMI: " + ", ".join([f'{i["name"]} %{i["value"]}' for i in items[:5]])
+        alloc_str = "\nPORTFÖY DAĞILIMI: " + ", ".join([i["name"] + " %" + str(i["value"]) for i in items[:5]])
 
-    from datetime import datetime
-    months_tr = {1:'Ocak',2:'Şubat',3:'Mart',4:'Nisan',5:'Mayıs',6:'Haziran',
-                 7:'Temmuz',8:'Ağustos',9:'Eylül',10:'Ekim',11:'Kasım',12:'Aralık'}
+    months_tr = {1:"Ocak",2:"Şubat",3:"Mart",4:"Nisan",5:"Mayıs",6:"Haziran",
+                 7:"Temmuz",8:"Ağustos",9:"Eylül",10:"Ekim",11:"Kasım",12:"Aralık"}
     now = datetime.now()
     current_month_str = f"{months_tr[now.month]} {now.year}"
 
-    prompt = f"""Türk yatırım fonu analizi. SADECE JSON döndür.
+    prompt = f"""Sen bir Türk yatırım fonu analistisin.
 
-FON: {fund_code} - {fund_info.get("name", "")}
-TİP: {fund_info.get("fundType", "?")} | RİSK: {fund_info.get("riskScore", "?")}/7
-GÜNCEL FİYAT: {prices[-1] if prices else "?"} TL
-PORTFÖY: ₺{round(fund_info.get("totalValue", 0)/1e9, 2)}B | {int(fund_info.get("participantCount", 0)):,} yatırımcı
-AYLIK GETİRİ: %{monthly_return} | TOPLAM GETİRİ ({len(prices)} gün): %{total_return}
-STOPAJ: %{fund_info.get("stopajRate", 17.5)} | VALÖR: {fund_info.get("valor", "T+1/T+2")}
+FON VERİLERİ:
+- Kod: {fund_code} | Ad: {fund_info.get("name", "")}
+- Tür: {fund_info.get("fundType", "?")} | Risk: {fund_info.get("riskScore", "?")}/7
+- Güncel Fiyat: {prices[-1] if prices else "?"} TL
+- Portföy Büyüklüğü: {round(fund_info.get("totalValue", 0)/1e6, 1)}M TL
+- Yatırımcı Sayısı: {int(fund_info.get("participantCount", 0)):,}
+- Aylık Getiri: %{monthly_return}
+- 6 Aylık Ort. Aylık Getiri: %{avg_6m_monthly if avg_6m_monthly is not None else "?"}
+- Toplam Getiri ({len(prices)} gün): %{total_return}
+- Stopaj: %{fund_info.get("stopajRate", 17.5)} | Valör: {fund_info.get("valor", "T+1/T+2")}
 {holdings_str}{alloc_str}{ev_str}
 
-JSON formatı:
-{{"aiInsights": ["Tespit 1", "Tespit 2", "Tespit 3", "Tespit 4", "Tespit 5"],
-  "dexterRecommendations": ["Öneri 1", "Öneri 2", "Öneri 3"],
-  "twitterSummary": "📊 KOD | FON ADI KISA\n━━━━━━━━━━━━━━\n🚀 Aylık: +X.XX% | Toplam (NNN gün): +XXX.XX%\n💼 Portföy: ₺XXXm | XXX yatırımcı\n⚠️ Risk: X/7 · Düşük/Orta/Yüksek · Sharpe: X.XX\n\n🔍 Öne Çıkanlar:\n• Gerçek portföy/performans tespiti 1\n• Gerçek portföy/performans tespiti 2\n• Gerçek portföy/performans tespiti 3\n\n📅 {current_month_str} · TEFAS Verisi\n#YatırımFonu #TEFAS #Fon"}}}}
+KURALLAR:
+- Türkçe yaz.
+- Sadece yukarıdaki verileri kullan.
+- Veri bulunmayan konuda yorum yapma.
+- Her tespit en az bir sayısal veri içermelidir.
+- Genel ifadeler kullanma (örn: güçlü performans, iyi getiri vb.)
+- Her tespit "veri → sonuç" formatında olmalıdır.
+- Fonun performansı, risk seviyesi ve yatırımcı davranışı hakkında somut analiz üret.
+- Analiz TEFAS fon verilerine uygun olmalıdır.
+- twitterSummary 280 karakteri geçmemeli, gerçek sayılar kullanılmalı.
+- JSON dışında hiçbir çıktı üretme.
 
-Kurallar:
-- aiInsights: Fon hakkında veriye dayalı 5 somut tespit (getiri, risk, volatilite, portföy yapısı, yatırımcı kitlesi)
-- dexterRecommendations: 3 actionable yatırım önerisi (al/sat/bekle değil, strateji bazlı)
-- twitterSummary: Yukarıdaki formatı kullan, gerçek sayılarla doldur. Tarih olarak {current_month_str} yaz, başka tarih yazma. Öne çıkanlar kısmında: 1. en büyük top holding varlık adı ve ağırlığı, 2. sharpe oranı ve trendi, 3. momentum veya volatilite yorumu. Genel laflar YAZMA. 280 karakter altında tut.
-- Türkçe yaz, sayısal verilere dayan, genel laflar etme"""
+Örnek tespit: "Aylık getiri %{monthly_return} olup 6 aylık ortalama olan %{avg_6m_monthly}'in {'üzerindedir' if avg_6m_monthly and monthly_return > avg_6m_monthly else 'altındadır'}."
 
-    client = anthropic.Anthropic(api_key=api_key)
+ÇIKTI (sadece JSON):
+{{"aiInsights":["tespit1","tespit2","tespit3","tespit4","tespit5"],
+  "dexterRecommendations":["öneri1","öneri2","öneri3"],
+  "twitterSummary":"📊 {fund_code} | KISAAD\n━━━━━━━━━━━━━━\n🚀 Aylık: %{monthly_return} | Toplam ({len(prices)}g): %{total_return}\n💼 {round(fund_info.get("totalValue",0)/1e6,0):.0f}M TL | {int(fund_info.get("participantCount",0)):,} yatırımcı\n⚠️ Risk: {fund_info.get("riskScore","?")} /7 · Sharpe: {evolver.get("last_sharpe","?")}\n\n🔍 Öne Çıkanlar:\n• veri bazlı tespit 1\n• veri bazlı tespit 2\n• veri bazlı tespit 3\n\n📅 {current_month_str} · TEFAS\n#YatırımFonu #TEFAS"}}"""
+
+    client = Groq(api_key=api_key)
     loop = asyncio.get_running_loop()
-    resp = await loop.run_in_executor(None, lambda: client.messages.create(
-        model="claude-sonnet-4-20250514", max_tokens=1000,
-        messages=[{"role": "user", "content": prompt}]
+    resp = await loop.run_in_executor(None, lambda: client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": "Sen bir Türk yatırım fonu analistisin. Sadece JSON döndür, başka hiçbir şey yazma."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=1000,
+        temperature=0.3,
+        response_format={"type": "json_object"},
     ))
-    text = resp.content[0].text.strip()
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-    return json.loads(text.strip().rstrip("```").strip())
+    text = resp.choices[0].message.content.strip()
+    return json.loads(text)
 
 
 # ─── API ROUTES ────────────────────────────────────────────────────────────────
