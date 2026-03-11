@@ -300,9 +300,9 @@ function EvolverPanel({ fundCode }) {
 
 
 function RiskScoreInput({ fundCode, onSaved }) {
-  const [editing, setEditing] = React.useState(false)
-  const [val, setVal] = React.useState('')
-  const [saving, setSaving] = React.useState(false)
+  const [editing, setEditing] = useState(false)
+  const [val, setVal] = useState('')
+  const [saving, setSaving] = useState(false)
 
   const save = async () => {
     const r = parseInt(val)
