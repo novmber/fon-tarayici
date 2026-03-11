@@ -429,7 +429,7 @@ export default function FundDetail({ fundCode, onClose, onDeleteFund, onRefresh 
             <div key={i} style={{ background: '#1e293b', borderRadius: 10, padding: '11px 13px' }}>
               <div style={{ color: '#64748b', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.8 }}>{m.label}</div>
               {m.editable ? (
-                <RiskScoreInput fundCode={fund.fundCode} onSaved={(r) => setFund(f => ({...f, riskScore: r}))} />
+                <RiskScoreInput fundCode={fund.code} onSaved={(r) => setFund(f => ({...f, riskScore: r}))} />
               ) : (
                 <div style={{ color: '#f1f5f9', fontWeight: 700, fontSize: 14, marginTop: 3 }}>{m.value}</div>
               )}
