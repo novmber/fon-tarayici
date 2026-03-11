@@ -381,11 +381,15 @@ export default function FundDetail({ fundCode, onClose, onDeleteFund, onRefresh 
             { label: 'Pay Fiyatı (TEFAS)', value: (() => { const p = fund.unitPrice; if (!p) return '—'; const fmt = (n, dec) => { const parts = n.toFixed(dec).split('.'); parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, '.'); return parts.join(','); }; if (p >= 100) return fmt(p, 2) + ' TL'; if (p >= 1) return fmt(p, 4) + ' TL'; return fmt(p, 6) + ' TL'; })() },
             { label: 'Portföy', value: fund.totalValue >= 1e9 ? `₺${(fund.totalValue/1e9).toFixed(2)}B` : `₺${(fund.totalValue/1e6).toFixed(1)}M` },
             { label: 'Yatırımcı', value: fund.participantCount ? fund.participantCount.toLocaleString('tr-TR', {maximumFractionDigits:0}) : '—' },
-            { label: fund.avgMaturity ? 'Ort. Vade' : 'Risk Skoru', value: fund.avgMaturity ? `${fund.avgMaturity} gün` : fund.riskScore ? `${fund.riskScore}/7` : '—' },
+            { label: fund.avgMaturity ? 'Ort. Vade' : 'Risk Skoru', value: fund.avgMaturity ? `${fund.avgMaturity} gün` : fund.riskScore ? `${fund.riskScore}/7` : '—', editable: !fund.avgMaturity && !fund.riskScore },
           ].map((m, i) => (
             <div key={i} style={{ background: '#1e293b', borderRadius: 10, padding: '11px 13px' }}>
               <div style={{ color: '#64748b', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.8 }}>{m.label}</div>
-              <div style={{ color: '#f1f5f9', fontWeight: 700, fontSize: 14, marginTop: 3 }}>{m.value}</div>
+              {m.editable ? (
+                <RiskScoreInput fundCode={fund.fundCode} onSaved={(r) => setFund(f => ({...f, riskScore: r}))} />
+              ) : (
+                <div style={{ color: '#f1f5f9', fontWeight: 700, fontSize: 14, marginTop: 3 }}>{m.value}</div>
+              )}
             </div>
           ))}
         </div>

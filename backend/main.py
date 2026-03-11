@@ -1015,6 +1015,19 @@ async def analyze_pdf(fund_code: str, file: UploadFile = File(...)):
 
     return {"success": True, "fundCode": fund_code, "month": ai.get("month"), "monthKey": month_key}
 
+
+@app.post("/api/funds/{fund_code}/set-risk")
+async def set_risk_score(fund_code: str, risk_score: int = Body(..., embed=True), fund_type: str = Body(None, embed=True)):
+    fund_code = fund_code.upper()
+    async with AsyncSessionLocal() as session:
+        from sqlalchemy import update
+        values = {"risk_score": risk_score}
+        if fund_type:
+            values["fund_type"] = fund_type
+        await session.execute(update(FundRecord).where(FundRecord.fund_code == fund_code).values(**values))
+        await session.commit()
+    return {"success": True, "fundCode": fund_code, "riskScore": risk_score}
+
 @app.on_event("shutdown")
 async def shutdown_event():
     scheduler.shutdown()
