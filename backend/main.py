@@ -762,9 +762,6 @@ async def track_fund(payload: dict = Body(...)):
         await _update_evolver(session, fund_code, all_rows_full)
         await session.commit()
 
-    return {"success": True, "fundCode": fund_code, "fundName": fund_name,
-            "totalRows": len(rows), "newRows": new_count}
-
     # Otomatik analiz ve yayınla
     try:
         ai = await _analyze_tefas(fund_code, {
@@ -773,9 +770,10 @@ async def track_fund(payload: dict = Body(...)):
             "riskScore": int(fund_info.get("RISKDEGERI", 0) or 0) or None,
             "totalValue": float(rows[0].get("PORTFOYBUYUKLUK", 0)) if rows else 0,
             "participantCount": float(rows[0].get("KISISAYISI", 0)) if rows else 0,
-        }, {}, all_rows, top_holdings)
+        }, {}, all_rows_full, top_holdings)
         async with AsyncSessionLocal() as session2:
-            await session2.execute(update(FundRecord).where(FundRecord.fund_code == fund_code).values(
+            from sqlalchemy import update as sa_update
+            await session2.execute(sa_update(FundRecord).where(FundRecord.fund_code == fund_code).values(
                 ai_insights=json.dumps(ai.get("aiInsights", []), ensure_ascii=False),
                 dexter_recommendations=json.dumps(ai.get("dexterRecommendations", []), ensure_ascii=False),
                 twitter_summary=ai.get("twitterSummary", ""),
@@ -783,10 +781,12 @@ async def track_fund(payload: dict = Body(...)):
             ))
             await session2.commit()
         print(f"✅ {fund_code} otomatik analiz + yayınlandı")
+        import subprocess
+        subprocess.Popen(["/bin/bash", "/root/FONAR/export-public.sh"])
     except Exception as e:
         print(f"⚠️ {fund_code} otomatik analiz hatası: {e}")
-
-
+    return {"success": True, "fundCode": fund_code, "fundName": fund_name,
+            "totalRows": len(rows), "newRows": new_count}
 
 @app.post("/api/funds/{fund_code}/refresh")
 async def refresh_fund(fund_code: str):
