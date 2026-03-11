@@ -360,7 +360,7 @@ export default function FundDetail({ fundCode, onClose, onDeleteFund, onRefresh 
         {/* Metrikler */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, padding: '14px 26px' }}>
           {[
-            { label: 'Pay Fiyatı (TEFAS)', value: `${fund.unitPrice?.toFixed(6)} TL` },
+            { label: 'Pay Fiyatı (TEFAS)', value: (() => { const p = fund.unitPrice; if (!p) return '—'; if (p >= 100) return p.toLocaleString('tr-TR', {minimumFractionDigits:2, maximumFractionDigits:2}) + ' TL'; if (p >= 1) return p.toFixed(4) + ' TL'; return p.toFixed(6) + ' TL'; })() },
             { label: 'Portföy', value: fund.totalValue >= 1e9 ? `₺${(fund.totalValue/1e9).toFixed(2)}B` : `₺${(fund.totalValue/1e6).toFixed(1)}M` },
             { label: 'Yatırımcı', value: fund.participantCount ? fund.participantCount.toLocaleString('tr-TR', {maximumFractionDigits:0}) : '—' },
             { label: fund.avgMaturity ? 'Ort. Vade' : 'Risk Skoru', value: fund.avgMaturity ? `${fund.avgMaturity} gün` : fund.riskScore ? `${fund.riskScore}/7` : '—' },

@@ -82,7 +82,7 @@ export default function FundCard({ fund, onClick, onRefresh }) {
         <div style={{ flex: 1, padding: '9px 12px', borderRight: manualData ? '1px solid #0f172a' : 'none' }}>
           <div style={{ color: '#475569', fontSize: 10, marginBottom: 2 }}>TEFAS ({fund.latestDate})</div>
           <div style={{ color: '#f1f5f9', fontWeight: 700, fontSize: 14, fontFamily: 'JetBrains Mono, monospace' }}>
-            {fund.unitPrice?.toFixed(6)} TL
+            {(() => { const p = fund.unitPrice; if (!p) return '—'; if (p >= 100) return p.toLocaleString('tr-TR', {minimumFractionDigits:2, maximumFractionDigits:2}) + ' TL'; if (p >= 1) return p.toFixed(4) + ' TL'; return p.toFixed(6) + ' TL'; })()} TL
           </div>
         </div>
         {manualData && (
