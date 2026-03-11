@@ -1123,6 +1123,8 @@ async def get_funds():
             "riskScore": r.risk_score, "fundType": r.fund_type,
             "hasPdfAnalysis": bool(r.has_pdf_analysis),
             "portfolioItems": json.loads(r.portfolio_items or "[]"),
+            "aiInsights": json.loads(r.ai_insights or "[]"),
+            "twitterSummary": r.twitter_summary,
         })
     return funds
 
@@ -1137,12 +1139,23 @@ async def get_fund_detail(fund_code: str):
     if not records:
         raise HTTPException(404, "Fon bulunamadı")
     r = records[0]
+    # Fiyat geçmişinden getiri hesapla
+    prices = sorted(records, key=lambda x: x.date_key)
+    prices_vals = [p.unit_price for p in prices if p.unit_price]
+    def calc_return(prices, days):
+        if len(prices) < 2: return None
+        idx = max(0, len(prices) - days)
+        p0, p1 = prices[idx], prices[-1]
+        if not p0: return None
+        return round((p1 - p0) / p0 * 100, 2)
+    monthly_return = r.monthly_return if r.monthly_return is not None else calc_return(prices_vals, 21)
+    yearly_return = r.yearly_return if r.yearly_return is not None else calc_return(prices_vals, 252)
     return {
         "code": fund_code, "name": r.fund_name,
         "latestDate": r.date_key, "unitPrice": r.unit_price,
         "totalValue": r.total_value, "participantCount": r.participant_count,
         "shareCount": r.share_count,
-        "monthlyReturn": r.monthly_return, "yearlyReturn": r.yearly_return,
+        "monthlyReturn": monthly_return, "yearlyReturn": yearly_return,
         "avgMaturity": r.avg_maturity, "monthlyTurnover": r.monthly_turnover,
         "riskScore": r.risk_score, "stopajRate": r.stopaj_rate,
         "valor": r.valor, "fundType": r.fund_type,
