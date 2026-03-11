@@ -112,7 +112,25 @@ function TwitterPanel({ text, fund, latest, onAnalyze }) {
       </div>
       {/* Butonlar */}
       <div style={{ display: 'flex', gap: 10 }}>
-        <button onClick={() => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 2000) }}
+        <button onClick={() => {
+          try {
+            if (navigator.clipboard && window.isSecureContext) {
+              navigator.clipboard.writeText(text)
+            } else {
+              const el = document.createElement('textarea')
+              el.value = text
+              el.style.position = 'fixed'
+              el.style.opacity = '0'
+              document.body.appendChild(el)
+              el.focus()
+              el.select()
+              document.execCommand('copy')
+              document.body.removeChild(el)
+            }
+            setCopied(true)
+            setTimeout(() => setCopied(false), 2000)
+          } catch(e) { console.error(e) }
+        }}
           style={{ flex: 1, background: copied ? '#00C2A8' : '#1d9bf0', color: 'white', border: 'none', borderRadius: 20, padding: '10px 22px', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
           {copied ? '✓ Kopyalandı!' : "📋 Tweet Metnini Kopyala"}
         </button>
