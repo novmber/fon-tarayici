@@ -765,6 +765,28 @@ async def track_fund(payload: dict = Body(...)):
     return {"success": True, "fundCode": fund_code, "fundName": fund_name,
             "totalRows": len(rows), "newRows": new_count}
 
+    # Otomatik analiz ve yayınla
+    try:
+        ai = await _analyze_tefas(fund_code, {
+            "name": fund_name,
+            "fundType": fund_info.get("FONTUR"),
+            "riskScore": int(fund_info.get("RISKDEGERI", 0) or 0) or None,
+            "totalValue": float(rows[0].get("PORTFOYBUYUKLUK", 0)) if rows else 0,
+            "participantCount": float(rows[0].get("KISISAYISI", 0)) if rows else 0,
+        }, {}, all_rows, top_holdings)
+        async with AsyncSessionLocal() as session2:
+            await session2.execute(update(FundRecord).where(FundRecord.fund_code == fund_code).values(
+                ai_insights=json.dumps(ai.get("aiInsights", []), ensure_ascii=False),
+                dexter_recommendations=json.dumps(ai.get("dexterRecommendations", []), ensure_ascii=False),
+                twitter_summary=ai.get("twitterSummary", ""),
+                published=1,
+            ))
+            await session2.commit()
+        print(f"✅ {fund_code} otomatik analiz + yayınlandı")
+    except Exception as e:
+        print(f"⚠️ {fund_code} otomatik analiz hatası: {e}")
+
+
 
 @app.post("/api/funds/{fund_code}/refresh")
 async def refresh_fund(fund_code: str):

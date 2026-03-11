@@ -16,22 +16,21 @@ HEADERS = {
 
 def fetch(endpoint: str, fonkod: str, bastarih: str, bittarih: str) -> dict:
     url = f"https://www.tefas.gov.tr/api/DB/{endpoint}"
-    payload = urllib.parse.urlencode({
-        "fontip": "YAT",
-        "fonkod": fonkod,
-        "bastarih": bastarih,
-        "bittarih": bittarih,
-    }).encode("utf-8")
-
-    req = urllib.request.Request(url, data=payload, headers=HEADERS, method="POST")
-
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        raw = resp.read().decode("utf-8")
-
-    if not raw.strip() or raw.strip().startswith("<"):
-        raise ValueError(f"WAF/bos yanit: {raw[:120]}")
-
-    return json.loads(raw)
+    fontip_list = ["YAT", "EMK", ""] if endpoint == "BindFundInfo" else ["YAT"]
+    for fontip in fontip_list:
+        payload_dict = {"fonkod": fonkod, "bastarih": bastarih, "bittarih": bittarih}
+        if fontip:
+            payload_dict["fontip"] = fontip
+        payload = urllib.parse.urlencode(payload_dict).encode("utf-8")
+        req = urllib.request.Request(url, data=payload, headers=HEADERS, method="POST")
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8")
+        if not raw.strip() or raw.strip().startswith("<"):
+            continue
+        result = json.loads(raw)
+        if result.get("data"):
+            return result
+    return {"data": []}
 
 
 if __name__ == "__main__":
