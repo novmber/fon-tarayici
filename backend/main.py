@@ -932,7 +932,7 @@ async def startup_event():
                 print(f"  ❌ {code} hata: {e}")
         print(f"🔄 Tamamlandı. {len(codes)} fon güncellendi.")
 
-    scheduler.add_job(nightly_refresh, CronTrigger(hour=3, minute=0), id="nightly_refresh", replace_existing=True)
+    scheduler.add_job(nightly_refresh, CronTrigger(hour=11, minute=30), id="nightly_refresh", replace_existing=True)
     scheduler.start()
     print("⏰ Scheduler başlatıldı (her gece 03:00)")
 
