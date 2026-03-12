@@ -894,64 +894,87 @@ KURALLAR:
         else:
             raise
 
-    # Tweet metnini Python'da oluştur — Groq'a bırakma
-    fund_name_short = fund_info.get("name", fund_code)[:40]
+    # Tweet metnini Python'da oluştur — zengin, Sharpe'sız
+    fund_name_full = fund_info.get("name", fund_code)
     tv = fund_info.get("totalValue", 0) or 0
     tv_str = f"₺{tv/1e9:.2f}B" if tv >= 1e9 else f"₺{tv/1e6:.0f}M"
     pc = int(fund_info.get("participantCount", 0) or 0)
-    risk = fund_info.get("riskScore", "?")
-    risk_label = {"1":"Çok Düşük","2":"Düşük","3":"Orta-Düşük","4":"Orta","5":"Orta-Yüksek","6":"Yüksek","7":"Çok Yüksek"}.get(str(risk), "?")
-    sharpe = evolver.get("last_sharpe", "?")
-    # Evolver'dan sharpe al
-    sharpe = "?"
-    if evolver:
-        sharpe = evolver.get("last_sharpe", "?")
-    else:
-        # price_pattern memory'den al
-        pass
-    # Öne çıkanlar: kısa ve veri bazlı, Python'da üret
-    highlights = []
-    # 1. En büyük portföy kalemi
-    items = fund_info.get("portfolioItems", [])
-    if items:
-        top_item = max(items, key=lambda x: x.get("value", 0))
-        highlights.append(f'{top_item["name"]} %{top_item["value"]:.1f} ile en büyük kalem')
-    # 2. Sharpe yorumu
-    if sharpe != "?" and sharpe is not None:
-        try:
-            s = float(sharpe)
-            if s >= 2:
-                highlights.append(f"Sharpe {s:.2f} — risk/getiri dengesi güçlü")
-            elif s >= 1:
-                highlights.append(f"Sharpe {s:.2f} — risk/getiri dengesi iyi")
-            else:
-                highlights.append(f"Sharpe {s:.2f} — orta düzey risk/getiri")
-        except: pass
-    # 3. Aylık vs 6 aylık karşılaştırma
-    if avg_6m_monthly is not None:
-        if monthly_return > avg_6m_monthly:
-            highlights.append(f"Aylık %{monthly_return} → 6a ort. %{avg_6m_monthly}'nin üzerinde")
-        else:
-            highlights.append(f"Aylık %{monthly_return} → 6a ort. %{avg_6m_monthly}'nin altında")
-    # Yedek: aiInsights'tan kısa al
-    if len(highlights) < 3:
-        for ins in ai.get("aiInsights", []):
-            if len(highlights) >= 3: break
-            short = ins[:55] + ("…" if len(ins) > 55 else "")
-            highlights.append(short)
-    bullet_str = "\n".join(["• " + h for h in highlights])
+    pc_str = f"{pc:,}".replace(",", ".")
+    risk = fund_info.get("riskScore")
+    risk_label = {"1":"Çok Düşük 🟢","2":"Düşük 🟢","3":"Orta-Düşük 🟡","4":"Orta 🟡","5":"Orta-Yüksek 🟠","6":"Yüksek 🔴","7":"Çok Yüksek 🔴"}.get(str(risk), "Bilinmiyor")
+    risk_str = f"{risk}/7 · {risk_label}" if risk else "Belirtilmemiş"
     monthly_sign = "+" if monthly_return >= 0 else ""
     total_sign = "+" if total_return >= 0 else ""
-    twitter_summary = (
-        "📊 " + fund_code + " | " + fund_name_short + "\n"
-        "━━━━━━━━━━━━━━\n"
-        "🚀 Aylık: " + monthly_sign + str(monthly_return) + "% | Toplam (" + str(len(prices)) + "g): " + total_sign + str(total_return) + "%\n"
-        "💼 Portföy: " + tv_str + " | " + f"{pc:,}".replace(",", ".") + " yatırımcı\n"
-        "⚠️ Risk: " + str(risk) + "/7 · " + risk_label + " · Sharpe: " + str(sharpe) + "\n"
-        "\n🔍 Öne Çıkanlar:\n" + bullet_str + "\n"
-        "\n📅 " + current_month_str + " · TEFAS\n"
-        "#YatırımFonu #TEFAS #" + fund_code
-    )
+    fund_type = fund_info.get("fundType") or "Yatırım Fonu"
+    stopaj = fund_info.get("stopajRate", 17.5)
+    valor = fund_info.get("valor", "T+1/T+2")
+
+    # Portföy dağılımı satırı
+    items = fund_info.get("portfolioItems", [])
+    portfolio_line = ""
+    if items:
+        top3 = sorted(items, key=lambda x: x.get("value", 0), reverse=True)[:3]
+        portfolio_line = " | ".join([f'{i["name"]} %{i["value"]:.0f}' for i in top3])
+
+    # Performans yorumu
+    if avg_6m_monthly is not None:
+        if monthly_return > avg_6m_monthly * 1.2:
+            perf_yorum = f"Bu ay ortalamanın üzerinde 🚀"
+        elif monthly_return < 0 and avg_6m_monthly > 0:
+            perf_yorum = f"Bu ay negatife döndü, 6a ort. %{avg_6m_monthly}+ ⚠️"
+        elif monthly_return < avg_6m_monthly * 0.5:
+            perf_yorum = f"Bu ay ortalamanın altında kaldı 📉"
+        else:
+            perf_yorum = f"Ortalamaya yakın seyretti"
+    else:
+        perf_yorum = f"{len(prices)} günlük veri mevcut"
+
+    # Dexter önerisinden kısa özet
+    dexter_short = ""
+    dexter_recs = ai.get("dexterRecommendations", [])
+    if dexter_recs:
+        d = dexter_recs[0]
+        dexter_short = d[:120] + ("…" if len(d) > 120 else "")
+
+    # aiInsights'tan 2 kısa tespit
+    insights_short = []
+    for ins in ai.get("aiInsights", []):
+        if len(insights_short) >= 2: break
+        insights_short.append("• " + ins[:100] + ("…" if len(ins) > 100 else ""))
+
+    twitter_summary = f"""📊 #{fund_code} | {fund_name_full}
+━━━━━━━━━━━━━━━━━━━━
+📅 {current_month_str} · TEFAS · {fund_type}
+
+📈 PERFORMANS
+- Aylık: {monthly_sign}{monthly_return}%
+- Toplam ({len(prices)} gün): {total_sign}{total_return}%
+- 6 Aylık Ort: %{avg_6m_monthly if avg_6m_monthly is not None else "?"}
+- {perf_yorum}
+
+💼 FON BİLGİSİ
+- Büyüklük: {tv_str} | {pc_str} yatırımcı
+- Risk: {risk_str}
+- Fon Türü: {fund_type}"""
+
+    if portfolio_line:
+        twitter_summary += f"\n• Portföy: {portfolio_line}"
+
+    twitter_summary += f"""
+
+🔍 ANALİZ
+{chr(10).join(insights_short)}"""
+
+    if dexter_short:
+        twitter_summary += f"""
+
+💡 DEĞERLENDİRME
+{dexter_short}"""
+
+    twitter_summary += f"""
+
+#YatırımFonu #TEFAS #Borsaİstanbul"""
+
     ai["twitterSummary"] = twitter_summary
     return ai
 
