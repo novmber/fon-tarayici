@@ -247,6 +247,95 @@ async def _tefas_top_holdings(fund_code: str) -> list:
 
 # ─── EVOLVER ───────────────────────────────────────────────────────────────────
 
+async def _verify_predictions(session: AsyncSession, fund_code: str, current_price: float, current_date: str):
+    """Geçmiş Dexter tahminlerini doğrula ve doğruluk skorunu güncelle"""
+    preds = (await session.execute(
+        select(EvolverMemory).where(
+            EvolverMemory.fund_code == fund_code,
+            EvolverMemory.memory_type == "dexter_prediction"
+        ).order_by(EvolverMemory.snapshot_date)
+    )).scalars().all()
+
+    accuracy_results = []
+    for pred_rec in preds:
+        try:
+            pred = json.loads(pred_rec.content)
+        except:
+            continue
+        pred_date = pred.get("date", "")
+        pred_price = pred.get("price_at_prediction", 0)
+        direction = pred.get("direction", "neutral")
+        if not pred_price or not pred_date:
+            continue
+        # Kaç gün geçti
+        try:
+            from datetime import date as _date
+            d0 = _date.fromisoformat(pred_date)
+            d1 = _date.fromisoformat(current_date)
+            days_passed = (d1 - d0).days
+        except:
+            continue
+        if days_passed < 7:
+            continue
+        # Fiyat değişimi
+        price_change_pct = round((current_price - pred_price) / pred_price * 100, 2) if pred_price else 0
+        updated = False
+        # 7 günlük doğrulama
+        if days_passed >= 7 and pred.get("verified_7d") is None:
+            actual = "bullish" if price_change_pct > 1 else "bearish" if price_change_pct < -1 else "neutral"
+            pred["verified_7d"] = True
+            pred["result_7d"] = {"days": 7, "price_change": price_change_pct, "actual": actual, "correct": actual == direction}
+            updated = True
+        # 14 günlük doğrulama
+        if days_passed >= 14 and pred.get("verified_14d") is None:
+            actual = "bullish" if price_change_pct > 1.5 else "bearish" if price_change_pct < -1.5 else "neutral"
+            pred["verified_14d"] = True
+            pred["result_14d"] = {"days": 14, "price_change": price_change_pct, "actual": actual, "correct": actual == direction}
+            updated = True
+        # 30 günlük doğrulama
+        if days_passed >= 30 and pred.get("verified_30d") is None:
+            actual = "bullish" if price_change_pct > 3 else "bearish" if price_change_pct < -3 else "neutral"
+            pred["verified_30d"] = True
+            pred["result_30d"] = {"days": 30, "price_change": price_change_pct, "actual": actual, "correct": actual == direction}
+            updated = True
+        if updated:
+            pred_rec.content = json.dumps(pred, ensure_ascii=False)
+            pred_rec.last_seen = datetime.utcnow()
+        # Doğruluk istatistiği topla
+        for key in ["result_7d", "result_14d", "result_30d"]:
+            r = pred.get(key)
+            if r:
+                accuracy_results.append(r.get("correct", False))
+
+    # Genel doğruluk skorunu kaydet
+    if accuracy_results:
+        accuracy_pct = round(sum(1 for r in accuracy_results if r) / len(accuracy_results) * 100, 1)
+        total = len(accuracy_results)
+        acc_ex = await session.execute(select(EvolverMemory).where(
+            EvolverMemory.fund_code == fund_code,
+            EvolverMemory.memory_type == "signal_accuracy"
+        ))
+        acc_rec = acc_ex.scalar_one_or_none()
+        acc_content = json.dumps({
+            "accuracy_pct": accuracy_pct,
+            "total_predictions": total,
+            "correct": sum(1 for r in accuracy_results if r),
+            "last_updated": current_date
+        }, ensure_ascii=False)
+        if acc_rec:
+            acc_rec.content = acc_content
+            acc_rec.last_seen = datetime.utcnow()
+        else:
+            session.add(EvolverMemory(
+                fund_code=fund_code,
+                memory_type="signal_accuracy",
+                content=acc_content,
+                confidence=0.7,
+                snapshot_date=datetime.utcnow().date(),
+            ))
+    await session.commit()
+
+
 async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
     import math
     prices = [r["unit_price"] for r in rows if r.get("unit_price", 0) > 0]
@@ -276,7 +365,7 @@ async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
         if dd > max_dd:
             max_dd = dd
 
-    # Sharpe (risksiz oran %45 → günlük ~0.123%)
+    # Kazanç/Risk Skoru (risksiz oran %45 → günlük ~0.123%)
     risk_free_daily = 45 / 252
     excess = [r - risk_free_daily for r in all_returns]
     sharpe = (sum(excess) / len(excess)) / std_dev * math.sqrt(252) if std_dev > 0 else 0
@@ -311,7 +400,7 @@ async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
         "volatility_std": round(std_dev, 4),
         "annual_volatility": ann_vol,
         "max_drawdown": round(max_dd, 2),
-        "sharpe_ratio": round(sharpe, 2),
+        "kazanc_risk_skoru": round(sharpe, 2),
         "positive_days_pct": pos_ratio,
         "momentum_30d": momentum,
         "best_month": {"month": best_month[0], "return": round(best_month[1], 2)} if best_month else None,
@@ -359,7 +448,7 @@ async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
             except: pass
 
         # Sharpe trendi
-        sharpes = [d.get("sharpe_ratio") for d in snapdata if d.get("sharpe_ratio") is not None]
+        sharpes = [d.get("kazanc_risk_skoru") for d in snapdata if d.get("kazanc_risk_skoru") is not None]
         sharpe_trend = "artıyor" if len(sharpes) >= 2 and sharpes[-1] > sharpes[-2] else "azalıyor" if len(sharpes) >= 2 else "belirsiz"
 
         # Momentum trendi
@@ -378,13 +467,13 @@ async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
         signals = []
         curr = snapdata[-1]
         # Sharpe bazlı sinyal
-        sharpe = curr.get("sharpe_ratio", 0) or 0
+        sharpe = curr.get("kazanc_risk_skoru", 0) or 0
         if sharpe >= 1.0:
-            signals.append({"type": "pozitif", "msg": f"Sharpe {sharpe:.2f} — risk/getiri dengesi iyi"})
+            signals.append({"type": "pozitif", "msg": f"Faiz üstü kazanç skoru {sharpe:.2f} — enflasyon ve faize göre iyi getiri sağlıyor"})
         elif sharpe < 0:
-            signals.append({"type": "negatif", "msg": f"Sharpe negatif ({sharpe:.2f}) — getiri risksiz oranın altında"})
+            signals.append({"type": "negatif", "msg": f"Faiz üstü kazanç skoru negatif — bu fon banka faizinin bile altında getiri sağlıyor"})
         else:
-            signals.append({"type": "uyarı", "msg": f"Sharpe {sharpe:.2f} — orta düzey risk/getiri dengesi"})
+            signals.append({"type": "uyarı", "msg": f"Faiz üstü kazanç skoru {sharpe:.2f} — getiri orta düzeyde, faizi biraz geçiyor"})
 
         # Momentum sinyali
         mom = curr.get("momentum_30d", 0) or 0
@@ -416,7 +505,7 @@ async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
 
         # Trend sinyalleri
         if sharpe_trend == "artıyor":
-            signals.append({"type": "pozitif", "msg": "Sharpe trendi yukarı — risk/getiri dengesi iyileşiyor"})
+            signals.append({"type": "pozitif", "msg": "Kazanç kalitesi artıyor — son dönemde faiz üstü getiri güçleniyor"})
         if mom_trend == "güçleniyor":
             signals.append({"type": "pozitif", "msg": "Momentum güçleniyor — ivme artıyor"})
         if vol_trend == "artıyor":
@@ -431,7 +520,7 @@ async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
             "drawdown_trend": dd_trend,
             "snapshot_count": len(all_snaps),
             "signals": signals,
-            "last_sharpe": sharpes[-1] if sharpes else None,
+            "last_kazanc_skoru": sharpes[-1] if sharpes else None,
             "last_momentum": moms[-1] if moms else None,
             "last_vol": vols[-1] if vols else None,
         }, ensure_ascii=False)
@@ -454,6 +543,83 @@ async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
                 confidence=0.5,
                 snapshot_date=today,
             ))
+    # ─── FON KARAKTERİ ───────────────────────────────────────────────────────
+    if len(prices) >= 60:
+        char = {}
+        monthly_avgs = {}
+        for ym, ps in monthly.items():
+            if len(ps) >= 15:
+                monthly_avgs[ym[-2:]] = round((ps[-1] - ps[0]) / ps[0] * 100, 2)
+        if monthly_avgs:
+            best_month_num = max(monthly_avgs, key=monthly_avgs.get)
+            worst_month_num = min(monthly_avgs, key=monthly_avgs.get)
+            month_names = {"01":"Ocak","02":"Şubat","03":"Mart","04":"Nisan","05":"Mayıs",
+                          "06":"Haziran","07":"Temmuz","08":"Ağustos","09":"Eylül",
+                          "10":"Ekim","11":"Kasım","12":"Aralık"}
+            char["best_season"] = f"{month_names.get(best_month_num, best_month_num)}: ort. %{monthly_avgs[best_month_num]:+.1f}"
+            char["worst_season"] = f"{month_names.get(worst_month_num, worst_month_num)}: ort. %{monthly_avgs[worst_month_num]:+.1f}"
+        recovery_days = []
+        in_dd = False
+        dd_start = 0
+        peak_p = prices[0]
+        for i, p in enumerate(prices):
+            if p >= peak_p:
+                if in_dd:
+                    recovery_days.append(i - dd_start)
+                    in_dd = False
+                peak_p = p
+            elif (peak_p - p) / peak_p * 100 > 5 and not in_dd:
+                in_dd = True
+                dd_start = i
+        avg_recovery = round(sum(recovery_days) / len(recovery_days)) if recovery_days else None
+        char["avg_recovery_days"] = avg_recovery
+        if avg_recovery:
+            char["recovery_profile"] = ("hızlı toparlanıyor" if avg_recovery <= 10 else "orta hızda toparlanıyor" if avg_recovery <= 30 else "yavaş toparlanıyor") + f" (ort. {avg_recovery} gün)"
+        consistency = 0
+        if pos_ratio >= 55: consistency += 2
+        elif pos_ratio >= 50: consistency += 1
+        if max_dd < 10: consistency += 2
+        elif max_dd < 20: consistency += 1
+        if ann_vol < 20: consistency += 1
+        char["consistency_score"] = consistency
+        char["consistency_label"] = "yüksek" if consistency >= 4 else "orta" if consistency >= 2 else "düşük"
+        if len(prices) >= 90:
+            m1 = round((prices[-1] - prices[-22]) / prices[-22] * 100, 2)
+            m2 = round((prices[-22] - prices[-44]) / prices[-44] * 100, 2) if len(prices) >= 44 else None
+            m3 = round((prices[-44] - prices[-66]) / prices[-66] * 100, 2) if len(prices) >= 66 else None
+            char["monthly_momentum"] = [m for m in [m3, m2, m1] if m is not None]
+            if m2 is not None:
+                char["momentum_pattern"] = "ivme kazanıyor" if m1 > m2 else "ivme kaybediyor" if m1 < m2 * 0.5 else "ivme sabit"
+        total_ret = round((prices[-1] - prices[0]) / prices[0] * 100, 2)
+        vol_label = "yüksek dalgalanmalı" if ann_vol > 40 else "düşük dalgalanmalı" if ann_vol < 15 else "orta dalgalanmalı"
+        summary_parts = [f"{len(prices)} günde %{total_ret:+.1f} toplam getiri", vol_label]
+        if avg_recovery: summary_parts.append(f"düşüşten ort. {avg_recovery} günde çıkıyor")
+        if char.get("best_season"): summary_parts.append(f"en güçlü dönem {char['best_season']}")
+        char["summary"] = ", ".join(summary_parts)
+        char_content = json.dumps(char, ensure_ascii=False)
+        char_ex = await session.execute(select(EvolverMemory).where(
+            EvolverMemory.fund_code == fund_code,
+            EvolverMemory.memory_type == "fund_character"))
+        char_rec = char_ex.scalar_one_or_none()
+        if char_rec:
+            char_rec.content = char_content
+            char_rec.occurrence_count += 1
+            char_rec.confidence = min(0.99, char_rec.confidence + 0.02)
+            char_rec.last_seen = datetime.utcnow()
+        else:
+            session.add(EvolverMemory(
+                fund_code=fund_code,
+                memory_type="fund_character",
+                content=char_content,
+                confidence=0.6,
+                snapshot_date=today,
+            ))
+
+    # Geçmiş tahminleri doğrula
+    if prices:
+        today_str = datetime.utcnow().date().strftime("%Y-%m-%d")
+        await _verify_predictions(session, fund_code, prices[-1], today_str)
+
     await session.commit()
 
 
@@ -565,10 +731,42 @@ async def _analyze_tefas(fund_code: str, fund_info: dict, evolver: dict, history
 
     ev_signals = evolver.get("signals", [])
     ev_str = ""
+    # fund_character verisini çek
+    char_data = {}
+    async with AsyncSessionLocal() as _cs:
+        from sqlalchemy import select as _sel
+        _cr = await _cs.execute(_sel(EvolverMemory).where(
+            EvolverMemory.fund_code == fund_code,
+            EvolverMemory.memory_type == "fund_character"))
+        _crec = _cr.scalar_one_or_none()
+        if _crec:
+            try: char_data = json.loads(_crec.content)
+            except: pass
     if evolver:
+        char_summary = char_data.get("summary", "")
+        char_recovery = char_data.get("recovery_profile", "")
+        char_season = f"En iyi: {char_data.get('best_season','')} / En kötü: {char_data.get('worst_season','')}" if char_data.get("best_season") else ""
+        char_momentum = char_data.get("momentum_pattern", "")
+        char_consistency = char_data.get("consistency_label", "")
+        # Doğruluk geçmişini çek
+        acc_str = "henüz yeterli veri yok"
+        async with AsyncSessionLocal() as _as:
+            _ar = await _as.execute(_sel(EvolverMemory).where(
+                EvolverMemory.fund_code == fund_code,
+                EvolverMemory.memory_type == "signal_accuracy"))
+            _arec = _ar.scalar_one_or_none()
+            if _arec:
+                try:
+                    _ad = json.loads(_arec.content)
+                    acc_str = f"%{_ad.get('accuracy_pct','?')} doğruluk ({_ad.get('total_predictions','?')} test) — {_ad.get('signal_note','')}"
+                except: pass
         ev_str = f"""
-EVOLVER: Sharpe={evolver.get("last_sharpe","?")} ({evolver.get("sharpe_trend","?")}), Momentum={evolver.get("last_momentum","?")}% ({evolver.get("momentum_trend","?")}), Yıllık Volatilite={evolver.get("last_vol","?")}%, Drawdown trendi={evolver.get("drawdown_trend","?")}
-Sinyaller: {", ".join([s["msg"] for s in ev_signals[:5]])}"""
+DEXTER DOĞRULUK GEÇMİŞİ: {acc_str}
+FON KARAKTERİ: {char_summary}
+Toparlanma: {char_recovery} | Tutarlılık: {char_consistency} | Momentum: {char_momentum}
+Mevsimsel: {char_season}
+EVOLVER: FaizÜstüKazançSkoru={evolver.get("last_kazanc_skoru","?")} ({evolver.get("sharpe_trend","?")}), Momentum={evolver.get("last_momentum","?")}% ({evolver.get("momentum_trend","?")}), Drawdown trendi={evolver.get("drawdown_trend","?")}
+Sinyaller: {", ".join([s["msg"] for s in ev_signals[:3]])}"""
 
     holdings_str = ""
     if top_holdings:
@@ -609,13 +807,19 @@ KURALLAR:
 - Analiz TEFAS fon verilerine uygun olmalıdır.
 - twitterSummary 280 karakteri geçmemeli, gerçek sayılar kullanılmalı.
 - JSON dışında hiçbir çıktı üretme.
+- aiInsights: Her biri veri-sonuç formatında, sayısal içeren 5 analitik tespit.
+- dexterRecommendations: Teknik bilgisi olmayan bireysel yatırımcıya yönelik 3 somut aksiyon önerisi. Pasif ifadeler KESİNLİKLE YASAK. Her öneri bir koşul veya aksiyon içermeli. Teknik terim kullanma (Sharpe, volatilite, beta, kazanç skoru yasak). Günlük dil kullan. İyi örnek: Son ayda yüzde 7 düşen bu fon ortalamasının çok altında, yeni giriş yapmak yerine toparlanmayı bekle. İyi örnek: Paranın yüzde 68i dolar bazlı hisselerde, dolar yükselirse fon değer kazanır. Kötü örnek: Yatırımcılar riski dikkate almalıdır, BU TARZI YAZMA.
+İyi örnek 3: Bu fon 1 yılda yüzde 104 kazandırdı ama bu ay sert düştü, varsa karının bir kısmını çek, tamamını tutma.
+İyi örnek 4: Fon yüzde 17.5 stopaj kesiyor, kısa vadeli alım satım yaparsan bu vergiyi sık ödersin, uzun tut.
+- aiInsights: Her biri "veri sonuc" formatinda, sayisal iceren 5 analitik tespit.
+- dexterRecommendations: Teknik bilgisi olmayan bireysel yatirimciya yonelik 3 somut aksiyon onerisi. Pasif ifadeler YASAK. Her oneri bir kosul veya aksiyon icermeli. Teknik terim kullanma. Gunluk dil kullan. Iyi ornek: Son ayda yuzde 7 dusen bu fon ortalamasinin cok altinda, yeni giris yapmak yerine toparlanmayi bekle. Kotu ornek: Yatirimcilar riski dikkate almalidir BU TARZI YAZMA.
 
 Örnek tespit: "Aylık getiri %{monthly_return} olup 6 aylık ortalama olan %{avg_6m_monthly}'in {'üzerindedir' if avg_6m_monthly and monthly_return > avg_6m_monthly else 'altındadır'}."
 
 ÇIKTI (sadece JSON):
 {{"aiInsights":["tespit1","tespit2","tespit3","tespit4","tespit5"],
   "dexterRecommendations":["öneri1","öneri2","öneri3"],
-  "twitterSummary":"📊 {fund_code} | KISAAD\n━━━━━━━━━━━━━━\n🚀 Aylık: %{monthly_return} | Toplam ({len(prices)}g): %{total_return}\n💼 {round(fund_info.get("totalValue",0)/1e6,0):.0f}M TL | {int(fund_info.get("participantCount",0)):,} yatırımcı\n⚠️ Risk: {fund_info.get("riskScore","?")} /7 · Sharpe: {evolver.get("last_sharpe","?")}\n\n🔍 Öne Çıkanlar:\n• veri bazlı tespit 1\n• veri bazlı tespit 2\n• veri bazlı tespit 3\n\n📅 {current_month_str} · TEFAS\n#YatırımFonu #TEFAS"}}"""
+  "twitterSummary":"📊 {fund_code} | KISAAD\n━━━━━━━━━━━━━━\n🚀 Aylık: %{monthly_return} | Toplam ({len(prices)}g): %{total_return}\n💼 {round(fund_info.get("totalValue",0)/1e6,0):.0f}M TL | {int(fund_info.get("participantCount",0)):,} yatırımcı\n⚠️ Risk: {fund_info.get("riskScore","?")} /7\n\n🔍 Öne Çıkanlar:\n• veri bazlı tespit 1\n• veri bazlı tespit 2\n• veri bazlı tespit 3\n\n📅 {current_month_str} · TEFAS\n#YatırımFonu #TEFAS"}}"""
 
     client = Groq(api_key=api_key)
     loop = asyncio.get_running_loop()
@@ -781,8 +985,12 @@ async def track_fund(payload: dict = Body(...)):
             ))
             await session2.commit()
         print(f"✅ {fund_code} otomatik analiz + yayınlandı")
-        import subprocess
-        subprocess.Popen(["/bin/bash", "/root/FONAR/export-public.sh"])
+        import subprocess, threading
+        def delayed_export():
+            import time
+            time.sleep(5)
+            subprocess.run(["/bin/bash", "/root/FONAR/export-public.sh"])
+        threading.Thread(target=delayed_export, daemon=True).start()
     except Exception as e:
         print(f"⚠️ {fund_code} otomatik analiz hatası: {e}")
     return {"success": True, "fundCode": fund_code, "fundName": fund_name,
@@ -954,6 +1162,43 @@ async def analyze_tefas(fund_code: str):
             has_pdf_analysis=1,
         ))
         await session.commit()
+
+        # ── Dexter tahminini kaydet (feedback loop) ──────────────────────
+        current_price = history[-1]["unit_price"] if history else None
+        if current_price and ai.get("dexterRecommendations"):
+            recs_text = " ".join(ai.get("dexterRecommendations", [])).lower()
+            if any(w in recs_text for w in ["bekle", "düşüş", "çık", "sat", "realizasyon", "azalt"]):
+                predicted_direction = "bearish"
+            elif any(w in recs_text for w in ["al", "giriş", "artış", "yüksel", "güçlen"]):
+                predicted_direction = "bullish"
+            else:
+                predicted_direction = "neutral"
+            prediction = {
+                "date": datetime.utcnow().strftime("%Y-%m-%d"),
+                "price_at_prediction": round(current_price, 6),
+                "direction": predicted_direction,
+                "recommendations": ai.get("dexterRecommendations", []),
+                "verified_7d": None, "verified_14d": None, "verified_30d": None,
+                "result_7d": None, "result_14d": None, "result_30d": None,
+            }
+            pred_ex = await session.execute(select(EvolverMemory).where(
+                EvolverMemory.fund_code == fund_code,
+                EvolverMemory.memory_type == "dexter_prediction",
+                EvolverMemory.snapshot_date == datetime.utcnow().date()
+            ))
+            pred_rec = pred_ex.scalar_one_or_none()
+            if pred_rec:
+                pred_rec.content = json.dumps(prediction, ensure_ascii=False)
+                pred_rec.last_seen = datetime.utcnow()
+            else:
+                session.add(EvolverMemory(
+                    fund_code=fund_code,
+                    memory_type="dexter_prediction",
+                    content=json.dumps(prediction, ensure_ascii=False),
+                    confidence=0.5,
+                    snapshot_date=datetime.utcnow().date(),
+                ))
+            await session.commit()
 
     return {"success": True, "fundCode": fund_code,
             "aiInsights": ai.get("aiInsights", []),
