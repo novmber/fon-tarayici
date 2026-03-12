@@ -98,17 +98,52 @@ async def startup():
         async with AsyncSessionLocal() as session:
             result = await session.execute(select(FundRecord.fund_code).distinct())
             codes = [r[0] for r in result.fetchall()]
+        import asyncio as _asyncio
         for code in codes:
             try:
                 import httpx
                 async with httpx.AsyncClient() as client:
-                    await client.post(f"http://localhost:9009/api/funds/{code}/refresh", timeout=60)
-                    print(f"  ✅ {code} fiyat güncellendi")
+                    # Refresh öncesi son fiyatı al
+                    detail_before = await client.get(f"http://localhost:9009/api/funds/{code}", timeout=30)
+                    price_before = detail_before.json().get("unitPrice") if detail_before.status_code == 200 else None
+
+                    refresh_res = await client.post(f"http://localhost:9009/api/funds/{code}/refresh", timeout=60)
+                    refresh_data = refresh_res.json() if refresh_res.status_code == 200 else {}
+                    new_rows = refresh_data.get("newRows", 0)
+
+                    # Refresh sonrası fiyatı al
+                    detail_after = await client.get(f"http://localhost:9009/api/funds/{code}", timeout=30)
+                    price_after = detail_after.json().get("unitPrice") if detail_after.status_code == 200 else None
+
+                    if new_rows == 0 and price_before == price_after:
+                        print(f"  ⏭️ {code} fiyat değişmedi, analiz atlandı")
+                        continue
+
+                    print(f"  ✅ {code} fiyat güncellendi ({new_rows} yeni kayıt)")
+                    await _asyncio.sleep(3)
                     await client.post(f"http://localhost:9009/api/funds/{code}/analyze-tefas", timeout=120)
                     print(f"  🤖 {code} analiz tamamlandı")
+                    await _asyncio.sleep(5)
             except Exception as e:
-                print(f"  ❌ {code} hata: {e}")
+                err_str = str(e)
+                if "429" in err_str or "rate_limit" in err_str.lower():
+                    import re
+                    wait_match = re.search(r'try again in (\d+)m', err_str)
+                    wait_min = int(wait_match.group(1)) + 1 if wait_match else 12
+                    print(f"  ⏳ Rate limit — {wait_min} dakika bekleniyor...")
+                    await _asyncio.sleep(wait_min * 60)
+                    try:
+                        async with httpx.AsyncClient() as client2:
+                            await client2.post(f"http://localhost:9009/api/funds/{code}/analyze-tefas", timeout=120)
+                            print(f"  🤖 {code} analiz tamamlandı (retry)")
+                    except Exception as e2:
+                        print(f"  ❌ {code} retry hata: {e2}")
+                else:
+                    print(f"  ❌ {code} hata: {e}")
         print(f"✅ Tamamlandı. {len(codes)} fon güncellendi ve analiz edildi.")
+        import subprocess
+        subprocess.Popen(["/bin/bash", "/root/FONAR/export-public.sh"])
+        print("📤 Fonar export başlatıldı")
 
     scheduler.add_job(nightly_refresh, CronTrigger(hour=11, minute=30), id="nightly_refresh", replace_existing=True)
     scheduler.start()
@@ -987,10 +1022,15 @@ async def track_fund(payload: dict = Body(...)):
         print(f"✅ {fund_code} otomatik analiz + yayınlandı")
         import subprocess, threading
         def delayed_export():
-            import time
+            import time, subprocess
             time.sleep(5)
-            subprocess.run(["/bin/bash", "/root/FONAR/export-public.sh"])
+            result = subprocess.run(["/bin/bash", "/root/FONAR/export-public.sh"], capture_output=True, text=True)
+            print(f"📤 Export tamamlandı: {result.stdout[-200:] if result.stdout else ''}")
+            if result.returncode != 0:
+                print(f"❌ Export hata: {result.stderr[-200:] if result.stderr else ''}")
+        import threading
         threading.Thread(target=delayed_export, daemon=True).start()
+        print(f"📤 {fund_code} export başlatıldı (5sn sonra)")
     except Exception as e:
         print(f"⚠️ {fund_code} otomatik analiz hatası: {e}")
     return {"success": True, "fundCode": fund_code, "fundName": fund_name,
