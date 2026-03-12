@@ -858,18 +858,41 @@ KURALLAR:
 
     client = Groq(api_key=api_key)
     loop = asyncio.get_running_loop()
-    resp = await loop.run_in_executor(None, lambda: client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": "Sen bir Türk yatırım fonu analistisin. Sadece JSON döndür, başka hiçbir şey yazma."},
-            {"role": "user", "content": prompt}
-        ],
-        max_tokens=1000,
-        temperature=0.3,
-        response_format={"type": "json_object"},
-    ))
-    text = resp.choices[0].message.content.strip()
-    ai = json.loads(text)
+    try:
+        resp = await loop.run_in_executor(None, lambda: client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": "Sen bir Türk yatırım fonu analistisin. Sadece JSON döndür, başka hiçbir şey yazma."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=1000,
+            temperature=0.3,
+            response_format={"type": "json_object"},
+        ))
+        text = resp.choices[0].message.content.strip()
+        ai = json.loads(text)
+    except Exception as groq_err:
+        err_str = str(groq_err)
+        if "429" in err_str or "rate_limit" in err_str.lower():
+            import re
+            wait_match = re.search(r"in (\d+)m([\d.]+)s", err_str)
+            wait_sec = (int(wait_match.group(1)) * 60 + float(wait_match.group(2)) + 5) if wait_match else 720
+            print(f"⏳ Groq rate limit — {wait_sec:.0f}sn bekleniyor...")
+            await asyncio.sleep(wait_sec)
+            resp = await loop.run_in_executor(None, lambda: client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": "Sen bir Türk yatırım fonu analistisin. Sadece JSON döndür, başka hiçbir şey yazma."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=1000,
+                temperature=0.3,
+                response_format={"type": "json_object"},
+            ))
+            text = resp.choices[0].message.content.strip()
+            ai = json.loads(text)
+        else:
+            raise
 
     # Tweet metnini Python'da oluştur — Groq'a bırakma
     fund_name_short = fund_info.get("name", fund_code)[:40]
@@ -1200,6 +1223,7 @@ async def analyze_tefas(fund_code: str):
             dexter_recommendations=json.dumps(ai.get("dexterRecommendations", []), ensure_ascii=False),
             twitter_summary=ai.get("twitterSummary", ""),
             has_pdf_analysis=1,
+            published=1,
         ))
         await session.commit()
 
@@ -1243,7 +1267,8 @@ async def analyze_tefas(fund_code: str):
     return {"success": True, "fundCode": fund_code,
             "aiInsights": ai.get("aiInsights", []),
             "dexterRecommendations": ai.get("dexterRecommendations", []),
-            "twitterSummary": ai.get("twitterSummary", "")}
+            "twitterSummary": ai.get("twitterSummary", ""),
+            "published": 1}
 
 
 @app.post("/api/funds/{fund_code}/analyze-pdf")
