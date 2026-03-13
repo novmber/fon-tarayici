@@ -53,7 +53,7 @@ function PerfBar({ label, value, fundValue, color }) {
   )
 }
 
-export default function InfoCard({ fund, latest }) {
+export default function InfoCard({ fund, latest, priceHistory }) {
   const [benchmarks, setBenchmarks] = useState(null)
   const [loadingBench, setLoadingBench] = useState(true)
   const [period, setPeriod] = useState('1m')
@@ -219,15 +219,33 @@ export default function InfoCard({ fund, latest }) {
             </span>
           </div>
           <div style={{ background: '#1e293b', borderRadius: 12, padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ color: '#64748b', fontSize: 11 }}>Stopaj</span>
-            <span style={{ color: '#FFD166', fontWeight: 700, fontSize: 14 }}>
-              {latest.stopajRate != null ? `%${latest.stopajRate}` : '—'}
+            <span style={{ color: '#64748b', fontSize: 11 }}>30g Yatırımcı</span>
+            <span style={{ fontWeight: 700, fontSize: 14, color: (() => {
+              if (!priceHistory || priceHistory.length < 21) return '#94a3b8';
+              const diff = priceHistory[priceHistory.length-1].participantCount - priceHistory[priceHistory.length-21].participantCount;
+              return diff > 0 ? '#4ade80' : diff < 0 ? '#f87171' : '#94a3b8';
+            })() }}>
+              {(() => {
+                if (!priceHistory || priceHistory.length < 21) return '—';
+                const diff = priceHistory[priceHistory.length-1].participantCount - priceHistory[priceHistory.length-21].participantCount;
+                return (diff > 0 ? '+' : '') + Math.round(diff).toLocaleString('tr-TR');
+              })()}
             </span>
           </div>
           <div style={{ background: '#1e293b', borderRadius: 12, padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ color: '#64748b', fontSize: 11 }}>Valör</span>
-            <span style={{ color: '#94a3b8', fontWeight: 700, fontSize: 14 }}>
-              {latest.valor || '—'}
+            <span style={{ color: '#64748b', fontSize: 11 }}>30g Para Akışı</span>
+            <span style={{ fontWeight: 700, fontSize: 14, color: (() => {
+              if (!priceHistory || priceHistory.length < 21) return '#94a3b8';
+              const diff = priceHistory[priceHistory.length-1].totalValue - priceHistory[priceHistory.length-21].totalValue;
+              return diff > 0 ? '#4ade80' : diff < 0 ? '#f87171' : '#94a3b8';
+            })() }}>
+              {(() => {
+                if (!priceHistory || priceHistory.length < 21) return '—';
+                const diff = priceHistory[priceHistory.length-1].totalValue - priceHistory[priceHistory.length-21].totalValue;
+                const abs = Math.abs(diff);
+                const str = abs >= 1e9 ? (abs/1e9).toFixed(2)+'B' : abs >= 1e6 ? (abs/1e6).toFixed(0)+'M' : (abs/1e3).toFixed(0)+'K';
+                return (diff > 0 ? '+' : '-') + '₺' + str;
+              })()}
             </span>
           </div>
         </div>

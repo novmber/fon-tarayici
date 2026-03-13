@@ -1627,6 +1627,66 @@ async def get_stats():
 
 
 # ─── STATIC ────────────────────────────────────────────────────────────────────
+@app.get("/api/top5")
+async def get_top5():
+    """Son 1ay, 3ay, 6ay performansına göre top 5 fon"""
+    async with AsyncSessionLocal() as session:
+        codes_res = await session.execute(select(FundRecord.fund_code).distinct())
+        codes = [r[0] for r in codes_res.fetchall()]
+    
+    results = []
+    for code in codes:
+        async with AsyncSessionLocal() as session:
+            recs = (await session.execute(
+                select(FundRecord).where(FundRecord.fund_code == code)
+                .order_by(FundRecord.date_key)
+            )).scalars().all()
+        if len(recs) < 21: continue
+        prices = [r.unit_price for r in recs]
+        participants = [r.participant_count for r in recs]
+        total_values = [r.total_value for r in recs]
+        
+        def ret(n):
+            if len(prices) < n: return None
+            return round((prices[-1] / prices[-n] - 1) * 100, 2)
+        
+        # Yatırımcı ve para akışı trendi
+        p30 = round(participants[-1] - participants[-21], 0) if len(participants) >= 21 else None
+        p90 = round(participants[-1] - participants[-63], 0) if len(participants) >= 63 else None
+        flow30 = round(total_values[-1] - total_values[-21], 0) if len(total_values) >= 21 else None
+        
+        results.append({
+            "code": code,
+            "name": recs[-1].fund_name,
+            "riskScore": recs[-1].risk_score,
+            "fundType": recs[-1].fund_type,
+            "unitPrice": recs[-1].unit_price,
+            "totalValue": recs[-1].total_value,
+            "participantCount": recs[-1].participant_count,
+            "return1m": ret(21),
+            "return3m": ret(63),
+            "return6m": ret(126),
+            "return1y": ret(252),
+            "participantChange30d": p30,
+            "participantChange90d": p90,
+            "moneyFlow30d": flow30,
+            "aiInsights": json.loads(recs[-1].ai_insights or "[]"),
+            "dexterRecommendations": json.loads(recs[-1].dexter_recommendations or "[]"),
+        })
+    
+    def top5(key):
+        valid = [r for r in results if r.get(key) is not None]
+        return sorted(valid, key=lambda x: x[key], reverse=True)[:5]
+    
+    return {
+        "top5_1m": top5("return1m"),
+        "top5_3m": top5("return3m"),
+        "top5_6m": top5("return6m"),
+        "top5_1y": top5("return1y"),
+        "top5_flow": top5("moneyFlow30d"),
+        "top5_participants": top5("participantChange30d"),
+    }
+
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 if FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")

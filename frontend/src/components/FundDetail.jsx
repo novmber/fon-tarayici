@@ -480,7 +480,7 @@ export default function FundDetail({ fundCode, onClose, onDeleteFund, onRefresh 
 
           {tab === 'portfolio' && <PortfolioChart items={fund.portfolioItems} />}
 
-          {tab === 'infografik' && <InfoCard fund={fund} latest={latest} />}
+          {tab === 'infografik' && <InfoCard fund={fund} latest={latest} priceHistory={fund.priceHistory} />}
 
           {tab === 'canli' && (
             <ManualPrice

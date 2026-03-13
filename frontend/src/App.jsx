@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { getFunds, trackFund, refreshFund, analyzePDF, deleteFund, getStats } from './api.js'
 import FundCard from './components/FundCard.jsx'
 import FundDetail from './components/FundDetail.jsx'
+import Top5 from './components/Top5.jsx'
 
 export default function App() {
   const [funds, setFunds] = useState([])
@@ -127,6 +128,10 @@ export default function App() {
 
         {/* Fon Ekle butonu */}
         <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => setViewMode(viewMode === 'top5' ? 'list' : 'top5')}
+            style={{ background: viewMode === 'top5' ? 'rgba(255,209,102,0.15)' : 'rgba(255,255,255,0.05)', color: viewMode === 'top5' ? '#FFD166' : '#94a3b8', border: `1px solid ${viewMode === 'top5' ? 'rgba(255,209,102,0.3)' : 'rgba(255,255,255,0.1)'}`, borderRadius: 8, padding: '7px 14px', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
+            🏆 {viewMode === 'top5' ? 'Listeye Dön' : 'Top 5'}
+          </button>
           <button onClick={() => setViewMode(viewMode === 'compare' ? 'list' : 'compare')}
             style={{ background: viewMode === 'compare' ? 'rgba(255,209,102,0.15)' : 'rgba(255,255,255,0.05)', color: viewMode === 'compare' ? '#FFD166' : '#94a3b8', border: `1px solid ${viewMode === 'compare' ? 'rgba(255,209,102,0.3)' : 'rgba(255,255,255,0.1)'}`, borderRadius: 8, padding: '7px 14px', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
             ⚖️ {viewMode === 'compare' ? 'Listeye Dön' : 'Kıyasla'}
@@ -296,6 +301,12 @@ export default function App() {
                     🔍 Sonuç bulunamadı
                   </div>
                 )}
+          {viewMode === 'top5' && (
+            <Top5 onSelectFund={(code) => {
+              const f = funds.find(x => x.code === code)
+              if (f) { setSelected(f); setViewMode('list') }
+            }} />
+          )}
           {viewMode === 'compare' && (
             <div style={{ padding: '24px 0' }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: '#FFD166', marginBottom: 16 }}>⚖️ Karşılaştırmak istediğiniz iki fonu seçin</div>
