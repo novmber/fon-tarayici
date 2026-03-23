@@ -288,6 +288,55 @@ export default function InfoCard({ fund, latest, priceHistory }) {
         </div>
       </div>
 
+      {/* ─── SCORECARD ─── */}
+      {fund.scorecard && fund.scorecard.overall && (
+        <div style={{ background: '#1e293b', borderRadius: 16, padding: '18px 20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+            <p style={{ color: '#f1f5f9', fontSize: 14, fontWeight: 600, margin: 0 }}>🏅 AI Scorecard</p>
+            <div style={{
+              background: fund.scorecard.overall >= 70 ? 'rgba(74,222,128,0.15)' : fund.scorecard.overall >= 50 ? 'rgba(250,204,21,0.15)' : 'rgba(248,113,113,0.15)',
+              border: `1px solid ${fund.scorecard.overall >= 70 ? 'rgba(74,222,128,0.4)' : fund.scorecard.overall >= 50 ? 'rgba(250,204,21,0.4)' : 'rgba(248,113,113,0.4)'}`,
+              borderRadius: 8, padding: '4px 12px', display: 'flex', alignItems: 'center', gap: 8
+            }}>
+              <span style={{ fontSize: 20, fontWeight: 800, color: fund.scorecard.overall >= 70 ? '#4ade80' : fund.scorecard.overall >= 50 ? '#facc15' : '#f87171' }}>
+                {fund.scorecard.overall}
+              </span>
+              <span style={{ fontSize: 16, fontWeight: 700, color: '#94a3b8' }}>{fund.scorecard.grade}</span>
+            </div>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {[
+              { label: '📈 İstikrar', value: fund.scorecard.istikrar, desc: `Max Düşüş: %${fund.scorecard.details?.maxDrawdown ?? '?'}` },
+              { label: '🏆 Yönetim', value: fund.scorecard.yonetim, desc: `Benchmark Kazanma: %${fund.scorecard.details?.benchmarkWinRate ?? '?'}` },
+              { label: '⏱️ Zamanlama', value: fund.scorecard.zamanlama, desc: fund.scorecard.details?.rsiYorum ?? '' },
+            ].map(({ label, value, desc }) => (
+              <div key={label}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <span style={{ fontSize: 12, color: '#94a3b8' }}>{label}</span>
+                  <span style={{ fontSize: 12, color: '#64748b' }}>{desc}</span>
+                </div>
+                <div style={{ height: 8, background: '#0f172a', borderRadius: 4, overflow: 'hidden' }}>
+                  <div style={{
+                    height: '100%', borderRadius: 4,
+                    width: `${value}%`,
+                    background: value >= 70 ? '#4ade80' : value >= 50 ? '#facc15' : '#f87171',
+                    transition: 'width 0.6s ease'
+                  }} />
+                </div>
+                <div style={{ textAlign: 'right', fontSize: 11, color: '#475569', marginTop: 2 }}>{value}/100</div>
+              </div>
+            ))}
+          </div>
+          {fund.scorecard.details?.rsi && (
+            <div style={{ marginTop: 12, padding: '8px 12px', background: '#0f172a', borderRadius: 8, fontSize: 12, color: '#94a3b8' }}>
+              RSI: <span style={{ fontWeight: 700, color: fund.scorecard.details.rsi > 70 ? '#f87171' : fund.scorecard.details.rsi < 30 ? '#4ade80' : '#facc15' }}>
+                {fund.scorecard.details.rsi}
+              </span> — {fund.scorecard.details.rsiYorum}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ─── PERFORMANS KARŞILAŞTIRMASI ─── */}
       <div style={{ background: '#1e293b', borderRadius: 16, padding: '18px 20px' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
