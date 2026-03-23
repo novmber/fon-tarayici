@@ -120,7 +120,10 @@ async def startup():
                         continue
 
                     print(f"  ✅ {code} fiyat güncellendi ({new_rows} yeni kayıt)")
-                    await _asyncio.sleep(2)
+                    await _asyncio.sleep(3)
+                    await client.post(f"http://localhost:9009/api/funds/{code}/analyze-tefas", timeout=120)
+                    print(f"  🤖 {code} analiz tamamlandı")
+                    await _asyncio.sleep(5)
             except Exception as e:
                 err_str = str(e)
                 if "429" in err_str or "rate_limit" in err_str.lower():
@@ -725,7 +728,7 @@ JSON (başka hiçbir şey yazma):
     client = anthropic.Anthropic(api_key=api_key)
     loop = asyncio.get_running_loop()
     resp = await loop.run_in_executor(None, lambda: client.messages.create(
-        model="claude-haiku-4-5-20251001", max_tokens=1200,
+        model="claude-sonnet-4-20250514", max_tokens=2000,
         messages=[{"role": "user", "content": prompt}]
     ))
     text = resp.content[0].text.strip()
@@ -739,9 +742,10 @@ JSON (başka hiçbir şey yazma):
 
 async def _analyze_tefas(fund_code: str, fund_info: dict, evolver: dict, history: list, top_holdings: list) -> dict:
     """TEFAS + Evolver verisiyle Groq/Llama analizi"""
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    import openai
+    api_key = os.getenv("OPENROUTER_API_KEY", "")
     if not api_key:
-        raise HTTPException(500, "ANTHROPIC_API_KEY bulunamadı")
+        raise HTTPException(500, "OPENROUTER_API_KEY bulunamadı")
 
     prices = [r["unit_price"] for r in history if r.get("unit_price", 0) > 0]
     total_return = round((prices[-1] - prices[0]) / prices[0] * 100, 2) if len(prices) >= 2 else 0
@@ -835,24 +839,32 @@ KURALLAR:
 - dexterRecommendations: Teknik bilgisi olmayan bireysel yatırımcıya yönelik 3 somut aksiyon önerisi. Pasif ifadeler KESİNLİKLE YASAK. Her öneri bir koşul veya aksiyon içermeli. Teknik terim kullanma (Sharpe, volatilite, beta, kazanç skoru yasak). Günlük dil kullan. İyi örnek: Son ayda yüzde 7 düşen bu fon ortalamasının çok altında, yeni giriş yapmak yerine toparlanmayı bekle. İyi örnek: Paranın yüzde 68i dolar bazlı hisselerde, dolar yükselirse fon değer kazanır. Kötü örnek: Yatırımcılar riski dikkate almalıdır, BU TARZI YAZMA.
 İyi örnek 3: Bu fon 1 yılda yüzde 104 kazandırdı ama bu ay sert düştü, varsa karının bir kısmını çek, tamamını tutma.
 İyi örnek 4: Fon yüzde 17.5 stopaj kesiyor, kısa vadeli alım satım yaparsan bu vergiyi sık ödersin, uzun tut.
-
+- aiInsights: Her biri "veri sonuc" formatinda, sayisal iceren 5 analitik tespit.
+- dexterRecommendations: Teknik bilgisi olmayan bireysel yatirimciya yonelik 3 somut aksiyon onerisi. Pasif ifadeler YASAK. Her oneri bir kosul veya aksiyon icermeli. Teknik terim kullanma. Gunluk dil kullan. Iyi ornek: Son ayda yuzde 7 dusen bu fon ortalamasinin cok altinda, yeni giris yapmak yerine toparlanmayi bekle. Kotu ornek: Yatirimcilar riski dikkate almalidir BU TARZI YAZMA.
 
 Örnek tespit: "Aylık getiri %{monthly_return} olup 6 aylık ortalama olan %{avg_6m_monthly}'in {'üzerindedir' if avg_6m_monthly and monthly_return > avg_6m_monthly else 'altındadır'}."
 
 ÇIKTI (sadece JSON):
 {{"aiInsights":["tespit1","tespit2","tespit3","tespit4","tespit5"],
-  "dexterRecommendations":["öneri1","öneri2","öneri3"]}}"""
+  "dexterRecommendations":["öneri1","öneri2","öneri3"],
+  "twitterSummary":"📊 {fund_code} | KISAAD\n━━━━━━━━━━━━━━\n🚀 Aylık: %{monthly_return} | Toplam ({len(prices)}g): %{total_return}\n💼 {round(fund_info.get("totalValue",0)/1e6,0):.0f}M TL | {int(fund_info.get("participantCount",0)):,} yatırımcı\n⚠️ Risk: {fund_info.get("riskScore","?")} /7\n\n🔍 Öne Çıkanlar:\n• veri bazlı tespit 1\n• veri bazlı tespit 2\n• veri bazlı tespit 3\n\n📅 {current_month_str} · TEFAS\n#YatırımFonu #TEFAS"}}"""
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = openai.OpenAI(
+        api_key=api_key,
+        base_url="https://openrouter.ai/api/v1"
+    )
     loop = asyncio.get_running_loop()
     try:
-        resp = await loop.run_in_executor(None, lambda: client.messages.create(
-            model="claude-haiku-4-5-20251001",
+        resp = await loop.run_in_executor(None, lambda: client.chat.completions.create(
+            model="nvidia/nemotron-3-super-120b-a12b:free",
+            messages=[
+                {"role": "system", "content": "Sen bir Türk yatırım fonu analistisin. Sadece JSON döndür, başka hiçbir şey yazma."},
+                {"role": "user", "content": prompt}
+            ],
             max_tokens=1000,
-            system="Sen bir Türk yatırım fonu analistisin. Sadece JSON döndür, başka hiçbir şey yazma.",
-            messages=[{"role": "user", "content": prompt}]
+            temperature=0.3,
         ))
-        text = resp.content[0].text
+        text = resp.choices[0].message.content
         if not text:
             raise Exception("Model boş yanıt döndürdü")
         text = text.strip()
