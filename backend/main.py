@@ -737,6 +737,126 @@ JSON (başka hiçbir şey yazma):
 
 
 
+
+def _calculate_scorecard(prices: list, monthly_return: float, yearly_return: float, 
+                          risk_score: int, participant_history: list, 
+                          mevduat_aylik: float = 3.54) -> dict:
+    """Fon için 3 boyutlu scorecard hesapla (0-100)"""
+    import math
+    
+    scores = {}
+    details = {}
+
+    # 1. İSTİKRAR PUANI (volatilite + max drawdown)
+    if len(prices) >= 20:
+        returns = [(prices[i] - prices[i-1]) / prices[i-1] * 100 for i in range(1, len(prices))]
+        avg_r = sum(returns) / len(returns)
+        variance = sum((r - avg_r) ** 2 for r in returns) / len(returns)
+        volatility = math.sqrt(variance)
+        
+        # Max drawdown
+        peak = prices[0]
+        max_dd = 0
+        for p in prices:
+            if p > peak: peak = p
+            dd = (peak - p) / peak * 100
+            if dd > max_dd: max_dd = dd
+        
+        # Volatilite skoru: düşük vol = yüksek puan
+        vol_score = max(0, 100 - volatility * 8)
+        dd_score = max(0, 100 - max_dd * 2)
+        istikrar = round((vol_score * 0.5 + dd_score * 0.5), 1)
+        scores["istikrar"] = min(100, max(0, istikrar))
+        details["volatilite"] = round(volatility, 2)
+        details["maxDrawdown"] = round(max_dd, 2)
+    else:
+        scores["istikrar"] = 50
+        details["volatilite"] = None
+        details["maxDrawdown"] = None
+
+    # 2. YÖNETİM BAŞARISI (benchmark yenme oranı)
+    if len(prices) >= 30:
+        # Aylık dönemleri sayarak mevduatı kaç kez yendi
+        wins = 0
+        total_periods = 0
+        period = 21  # ~1 ay
+        for i in range(period, len(prices), period):
+            period_ret = (prices[i] - prices[i-period]) / prices[i-period] * 100
+            if period_ret > mevduat_aylik:
+                wins += 1
+            total_periods += 1
+        
+        win_rate = (wins / total_periods * 100) if total_periods > 0 else 50
+        # Risk cezası: yüksek risk skoru varsa yönetim puanını düşür
+        risk_penalty = (risk_score - 4) * 3 if risk_score > 4 else 0
+        yonetim = round(win_rate - risk_penalty, 1)
+        scores["yonetim"] = min(100, max(0, yonetim))
+        details["benchmarkWinRate"] = round(win_rate, 1)
+        details["riskPenalty"] = risk_penalty
+    else:
+        scores["yonetim"] = 50
+        details["benchmarkWinRate"] = None
+
+    # 3. GİRİŞ ZAMANLAMASI (RSI + fiyat pozisyonu)
+    if len(prices) >= 14:
+        # RSI hesapla (14 günlük)
+        gains, losses = [], []
+        for i in range(1, min(15, len(prices))):
+            diff = prices[-i] - prices[-(i+1)]
+            if diff > 0: gains.append(diff)
+            else: losses.append(abs(diff))
+        
+        avg_gain = sum(gains) / 14 if gains else 0.001
+        avg_loss = sum(losses) / 14 if losses else 0.001
+        rs = avg_gain / avg_loss
+        rsi = round(100 - (100 / (1 + rs)), 1)
+        
+        # RSI yorumu: 30-70 arası ideal giriş, 70+ pahalı, 30- ucuz
+        if rsi < 30:
+            timing_score = 85  # aşırı satım — iyi giriş
+        elif rsi < 50:
+            timing_score = 70  # makul
+        elif rsi < 70:
+            timing_score = 50  # nötr
+        else:
+            timing_score = 20  # aşırı alım — pahalı
+
+        # Katılımcı trendi: son 30g artıyorsa kötü (kalabalık), azalıyorsa iyi
+        if len(participant_history) >= 2:
+            pc_change = participant_history[-1] - participant_history[0]
+            if pc_change > participant_history[0] * 0.1:
+                timing_score -= 15  # çok popüler, geç kalınmış olabilir
+            elif pc_change < 0:
+                timing_score += 10  # çıkış var, ucuzlamış olabilir
+        
+        scores["zamanlama"] = min(100, max(0, timing_score))
+        details["rsi"] = rsi
+        details["rsiYorum"] = "Aşırı Satım 🟢" if rsi < 30 else ("Nötr ⚪" if rsi < 70 else "Aşırı Alım 🔴")
+    else:
+        scores["zamanlama"] = 50
+        details["rsi"] = None
+        details["rsiYorum"] = "Yetersiz veri"
+
+    # GENEL SKOR
+    overall = round((scores["istikrar"] * 0.35 + scores["yonetim"] * 0.40 + scores["zamanlama"] * 0.25), 1)
+    
+    def grade(s):
+        if s >= 80: return "A+"
+        if s >= 70: return "A"
+        if s >= 60: return "B+"
+        if s >= 50: return "B"
+        if s >= 40: return "C"
+        return "D"
+
+    return {
+        "overall": overall,
+        "grade": grade(overall),
+        "istikrar": scores["istikrar"],
+        "yonetim": scores["yonetim"], 
+        "zamanlama": scores["zamanlama"],
+        "details": details
+    }
+
 async def _analyze_tefas(fund_code: str, fund_info: dict, evolver: dict, history: list, top_holdings: list) -> dict:
     """TEFAS + Evolver verisiyle Groq/Llama analizi"""
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
@@ -747,6 +867,17 @@ async def _analyze_tefas(fund_code: str, fund_info: dict, evolver: dict, history
     total_return = round((prices[-1] - prices[0]) / prices[0] * 100, 2) if len(prices) >= 2 else 0
     recent_prices = prices[-30:] if len(prices) >= 30 else prices
     monthly_return = round((recent_prices[-1] - recent_prices[0]) / recent_prices[0] * 100, 2) if len(recent_prices) >= 2 else 0
+
+    # Scorecard hesapla
+    participant_history = [r.get("participantCount", 0) for r in history[-30:] if r.get("participantCount")]
+    scorecard = _calculate_scorecard(
+        prices=prices,
+        monthly_return=monthly_return,
+        yearly_return=total_return,
+        risk_score=fund_info.get("riskScore", 4),
+        participant_history=participant_history,
+        mevduat_aylik=3.54
+    )
 
     # 6 aylık ortalama aylık getiri
     monthly_returns = []
@@ -835,6 +966,14 @@ BENCHMARK (Son 30 Gün):
     except Exception as _be:
         pass
 
+    scorecard_str = f"""
+SCORECARD (0-100):
+- Genel: {scorecard["overall"]} ({scorecard["grade"]})
+- İstikrar: {scorecard["istikrar"]} | Yönetim: {scorecard["yonetim"]} | Zamanlama: {scorecard["zamanlama"]}
+- RSI: {scorecard["details"].get("rsi","?")} ({scorecard["details"].get("rsiYorum","?")})
+- Benchmark Kazanma Oranı: %{scorecard["details"].get("benchmarkWinRate","?")}
+- Max Drawdown: %{scorecard["details"].get("maxDrawdown","?")}"""
+
     holdings_str = ""
     if top_holdings:
         holdings_str = "\nTOP VARLIKLAR: " + ", ".join([h["name"] + " %" + str(h["weight"]) for h in top_holdings[:5]])
@@ -861,7 +1000,7 @@ FON VERİLERİ:
 - 6 Aylık Ort. Aylık Getiri: %{avg_6m_monthly if avg_6m_monthly is not None else "?"}
 - Toplam Getiri ({len(prices)} gün): %{total_return}
 - Stopaj: %{fund_info.get("stopajRate", 17.5)} | Valör: {fund_info.get("valor", "T+1/T+2")}
-{holdings_str}{alloc_str}{benchmark_str}{anomaly_str}{ev_str}
+{scorecard_str}{holdings_str}{alloc_str}{benchmark_str}{anomaly_str}{ev_str}
 
 KURALLAR:
 - Türkçe yaz.
@@ -1004,6 +1143,7 @@ KURALLAR:
         cut = max(last_space, last_nl)
         twitter_summary = truncated[:cut] + "…"
     ai["twitterSummary"] = twitter_summary
+    ai["scorecard"] = scorecard
     return ai
 
 
@@ -1319,7 +1459,7 @@ async def analyze_tefas(fund_code: str):
             "aiInsights": ai.get("aiInsights", []),
             "dexterRecommendations": ai.get("dexterRecommendations", []),
             "twitterSummary": ai.get("twitterSummary", ""),
-            "published": 1}
+            "scorecard": ai.get("scorecard", {}), "published": 1}
 
 
 @app.post("/api/funds/{fund_code}/analyze-pdf")
