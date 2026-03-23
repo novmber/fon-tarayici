@@ -760,6 +760,25 @@ async def _analyze_tefas(fund_code: str, fund_info: dict, evolver: dict, history
     avg_6m_monthly = round(sum(monthly_returns) / len(monthly_returns), 2) if monthly_returns else None
 
     ev_signals = evolver.get("signals", [])
+
+    # Anomali tespiti — katılımcı ve para akışı sinyalleri
+    anomaly_str = ""
+    try:
+        pc = fund_info.get("participantCount", 0) or 0
+        pc_change = fund_info.get("participantChange30d", 0) or 0
+        mf = fund_info.get("moneyFlow30d", 0) or 0
+        anomalies = []
+        if pc > 0 and pc_change / pc < -0.1:
+            anomalies.append(f"⚠️ Son 30 günde yatırımcıların %{abs(round(pc_change/pc*100,1))}'i fondan çıktı ({int(abs(pc_change)):,} kişi)")
+        elif pc_change > pc * 0.2:
+            anomalies.append(f"🚀 Son 30 günde yatırımcı sayısı %{round(pc_change/pc*100,1)} arttı ({int(pc_change):,} yeni kişi)")
+        if mf < -1e8:
+            anomalies.append(f"⚠️ Son 30 günde {abs(mf)/1e6:.0f}M TL fon terk etti — ciddi para çıkışı")
+        elif mf > 1e8:
+            anomalies.append(f"📈 Son 30 günde {mf/1e6:.0f}M TL para girişi — güçlü ilgi")
+        if anomalies:
+            anomaly_str = "\nANOMALİ SİNYALLERİ:\n" + "\n".join(anomalies)
+    except: pass
     ev_str = ""
     # fund_character ve signal_accuracy tek sorguda çek
     char_data = {}
@@ -792,6 +811,30 @@ Mevsimsel: {char_season}
 EVOLVER: FaizÜstüKazançSkoru={evolver.get("last_kazanc_skoru","?")} ({evolver.get("sharpe_trend","?")}), Momentum={evolver.get("last_momentum","?")}% ({evolver.get("momentum_trend","?")}), Drawdown trendi={evolver.get("drawdown_trend","?")}
 Sinyaller: {", ".join([s["msg"] for s in ev_signals[:3]])}"""
 
+    # Benchmark hesapla
+    benchmark_str = ""
+    try:
+        from sqlalchemy import select as _bsel
+        async with AsyncSessionLocal() as _bcs:
+            # Altın fonu getirisi (AFO)
+            _afo = (await _bcs.execute(
+                _bsel(FundRecord).where(FundRecord.fund_code == "AFO").order_by(FundRecord.date_key.desc()).limit(30)
+            )).scalars().all()
+            if len(_afo) >= 2:
+                _afo_prices = [r.unit_price for r in reversed(_afo)]
+                _afo_ret = round((_afo_prices[-1] - _afo_prices[0]) / _afo_prices[0] * 100, 2)
+            else:
+                _afo_ret = None
+        # Mevduat faizi (TCMB politika faizi ~%42.5 yıllık → aylık ~%3.1)
+        _mevduat_aylik = round(42.5 / 12, 2)
+        # 30 günlük dönem için benchmark
+        benchmark_str = f"""
+BENCHMARK (Son 30 Gün):
+- Mevduat (aylık ~%{_mevduat_aylik}): Risksiz alternatif
+- Altın Fonu (AFO) 30g: %{_afo_ret if _afo_ret is not None else "?"} getiri"""
+    except Exception as _be:
+        pass
+
     holdings_str = ""
     if top_holdings:
         holdings_str = "\nTOP VARLIKLAR: " + ", ".join([h["name"] + " %" + str(h["weight"]) for h in top_holdings[:5]])
@@ -818,11 +861,15 @@ FON VERİLERİ:
 - 6 Aylık Ort. Aylık Getiri: %{avg_6m_monthly if avg_6m_monthly is not None else "?"}
 - Toplam Getiri ({len(prices)} gün): %{total_return}
 - Stopaj: %{fund_info.get("stopajRate", 17.5)} | Valör: {fund_info.get("valor", "T+1/T+2")}
-{holdings_str}{alloc_str}{ev_str}
+{holdings_str}{alloc_str}{benchmark_str}{anomaly_str}{ev_str}
 
 KURALLAR:
 - Türkçe yaz.
 - Sadece yukarıdaki verileri kullan.
+- Benchmark karşılaştırması yap: fonun getirisi mevduatın altındaysa bunu açıkça belirt.
+- "Bu fon mevduattan %X daha az/fazla kazandırdı" gibi somut kıyaslamalar yap.
+- ANOMALİ SİNYALLERİ varsa bunları mutlaka aiInsights veya dexterRecommendations'a yansıt.
+- Kitlesel para çıkışı veya girişi varsa yatırımcıya bunu açıkça söyle.
 - Veri bulunmayan konuda yorum yapma.
 - Her tespit en az bir sayısal veri içermelidir.
 - Genel ifadeler kullanma (örn: güçlü performans, iyi getiri vb.)
@@ -907,13 +954,13 @@ KURALLAR:
     dexter_recs = ai.get("dexterRecommendations", [])
     if dexter_recs:
         d = dexter_recs[0]
-        dexter_short = d[:120] + ("…" if len(d) > 120 else "")
+        dexter_short = d[:280] + ("…" if len(d) > 280 else "")
 
     # aiInsights'tan 2 kısa tespit
     insights_short = []
     for ins in ai.get("aiInsights", []):
         if len(insights_short) >= 2: break
-        insights_short.append("• " + ins[:100] + ("…" if len(ins) > 100 else ""))
+        insights_short.append("• " + ins[:200] + ("…" if len(ins) > 200 else ""))
 
     twitter_summary = f"""📊 #{fund_code} | {fund_name_full}
 ━━━━━━━━━━━━━━━━━━━━
@@ -948,6 +995,14 @@ KURALLAR:
 
 #YatırımFonu #TEFAS #Borsaİstanbul"""
 
+    # 4000 karakter limiti (Twitter Premium) — kelime ortasında kesme
+    if len(twitter_summary) > 4000:
+        truncated = twitter_summary[:3997]
+        # Son tam kelimeyi bul
+        last_space = truncated.rfind(' ')
+        last_nl = truncated.rfind('\n')
+        cut = max(last_space, last_nl)
+        twitter_summary = truncated[:cut] + "…"
     ai["twitterSummary"] = twitter_summary
     return ai
 
