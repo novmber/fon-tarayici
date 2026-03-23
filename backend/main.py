@@ -1600,7 +1600,27 @@ async def get_public_funds():
                 "dexterRecommendations": json.loads(r.dexter_recommendations) if r.dexter_recommendations else [],
                 "twitterSummary": r.twitter_summary,
                 "portfolioItems": json.loads(r.portfolio_items) if r.portfolio_items else [],
+                "topHoldings": json.loads(r.top_holdings) if r.top_holdings else [],
             })
+        # Scorecard hesapla — aynı session içinde
+        for fund in funds:
+            prices_data = (await session.execute(
+                select(FundRecord.unit_price, FundRecord.participant_count)
+                .where(FundRecord.fund_code == fund["code"], FundRecord.unit_price > 0)
+                .order_by(FundRecord.date_key)
+            )).fetchall()
+            prices_vals = [r[0] for r in prices_data]
+            if len(prices_vals) >= 20:
+                fund["scorecard"] = _calculate_scorecard(
+                    prices=prices_vals,
+                    monthly_return=fund.get("monthlyReturn") or 0,
+                    yearly_return=fund.get("yearlyReturn") or 0,
+                    risk_score=fund.get("riskScore") or 4,
+                    participant_history=[r[1] for r in prices_data[-30:] if r[1]],
+                    mevduat_aylik=3.54
+                )
+            else:
+                fund["scorecard"] = {}
     return funds
 
 @app.get("/api/funds")
@@ -1681,6 +1701,14 @@ async def get_fund_detail(fund_code: str):
              "twitterSummary": rec.twitter_summary}
             for rec in records if rec.has_pdf_analysis
         ][:6],
+        "scorecard": _calculate_scorecard(
+            prices=prices_vals,
+            monthly_return=monthly_return or 0,
+            yearly_return=yearly_return or 0,
+            risk_score=r.risk_score or 4,
+            participant_history=[rec.participant_count for rec in prices[-30:] if rec.participant_count],
+            mevduat_aylik=3.54
+        ) if len(prices_vals) >= 20 else {},
     }
 
 
