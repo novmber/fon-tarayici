@@ -3,6 +3,7 @@ import { getFunds, trackFund, refreshFund, analyzePDF, deleteFund, getStats } fr
 import FundCard from './components/FundCard.jsx'
 import FundDetail from './components/FundDetail.jsx'
 import Top5 from './components/Top5.jsx'
+import DailyTweets from './components/DailyTweets.jsx'
 
 export default function App() {
   const [funds, setFunds] = useState([])
@@ -131,6 +132,10 @@ export default function App() {
           <button onClick={() => setViewMode(viewMode === 'top5' ? 'list' : 'top5')}
             style={{ background: viewMode === 'top5' ? 'rgba(255,209,102,0.15)' : 'rgba(255,255,255,0.05)', color: viewMode === 'top5' ? '#FFD166' : '#94a3b8', border: `1px solid ${viewMode === 'top5' ? 'rgba(255,209,102,0.3)' : 'rgba(255,255,255,0.1)'}`, borderRadius: 8, padding: '7px 14px', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
             🏆 {viewMode === 'top5' ? 'Listeye Dön' : 'Top 5'}
+          </button>
+          <button onClick={() => setViewMode(viewMode === 'tweets' ? 'list' : 'tweets')}
+            style={{ background: viewMode === 'tweets' ? 'rgba(29,161,242,0.15)' : 'rgba(255,255,255,0.05)', color: viewMode === 'tweets' ? '#1da1f2' : '#94a3b8', border: `1px solid ${viewMode === 'tweets' ? 'rgba(29,161,242,0.3)' : 'rgba(255,255,255,0.1)'}`, borderRadius: 8, padding: '7px 14px', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
+            🐦 {viewMode === 'tweets' ? 'Listeye Dön' : 'Tweetler'}
           </button>
           <button onClick={() => setViewMode(viewMode === 'compare' ? 'list' : 'compare')}
             style={{ background: viewMode === 'compare' ? 'rgba(255,209,102,0.15)' : 'rgba(255,255,255,0.05)', color: viewMode === 'compare' ? '#FFD166' : '#94a3b8', border: `1px solid ${viewMode === 'compare' ? 'rgba(255,209,102,0.3)' : 'rgba(255,255,255,0.1)'}`, borderRadius: 8, padding: '7px 14px', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
@@ -301,6 +306,7 @@ export default function App() {
                     🔍 Sonuç bulunamadı
                   </div>
                 )}
+          {viewMode === 'tweets' && <DailyTweets />}
           {viewMode === 'top5' && (
             <Top5 onSelectFund={(code) => {
               const f = funds.find(x => x.code === code)
