@@ -738,35 +738,30 @@ JSON (başka hiçbir şey yazma):
 
 
 
-def _calculate_scorecard(prices: list, monthly_return: float, yearly_return: float, 
-                          risk_score: int, participant_history: list, 
-                          mevduat_aylik: float = 3.54) -> dict:
-    """Fon için 3 boyutlu scorecard hesapla (0-100)"""
+def _calculate_scorecard(prices: list, monthly_return: float, yearly_return: float,
+                          risk_score: int, participant_history: list,
+                          mevduat_aylik: float = 3.54, evolver_data: list = None) -> dict:
+    """Kompozit fon scorecard — 8 boyutlu analiz (0-100)"""
     import math
-    
+
     scores = {}
     details = {}
 
-    # 1. İSTİKRAR PUANI (volatilite + max drawdown)
+    # ── 1. MAX DRAWDOWN + VOLATİLİTE (ağırlık %15) ──
     if len(prices) >= 20:
-        returns = [(prices[i] - prices[i-1]) / prices[i-1] * 100 for i in range(1, len(prices))]
-        avg_r = sum(returns) / len(returns)
-        variance = sum((r - avg_r) ** 2 for r in returns) / len(returns)
+        returns = [(prices[i]-prices[i-1])/prices[i-1]*100 for i in range(1, len(prices))]
+        avg_r = sum(returns)/len(returns)
+        variance = sum((r-avg_r)**2 for r in returns)/len(returns)
         volatility = math.sqrt(variance)
-        
-        # Max drawdown
         peak = prices[0]
         max_dd = 0
         for p in prices:
             if p > peak: peak = p
-            dd = (peak - p) / peak * 100
+            dd = (peak-p)/peak*100
             if dd > max_dd: max_dd = dd
-        
-        # Volatilite skoru: düşük vol = yüksek puan
-        vol_score = max(0, 100 - volatility * 8)
-        dd_score = max(0, 100 - max_dd * 2)
-        istikrar = round((vol_score * 0.5 + dd_score * 0.5), 1)
-        scores["istikrar"] = min(100, max(0, istikrar))
+        vol_score = max(0, 100 - volatility*8)
+        dd_score = max(0, 100 - max_dd*2)
+        scores["istikrar"] = min(100, max(0, round((vol_score*0.5+dd_score*0.5), 1)))
         details["volatilite"] = round(volatility, 2)
         details["maxDrawdown"] = round(max_dd, 2)
     else:
@@ -774,61 +769,52 @@ def _calculate_scorecard(prices: list, monthly_return: float, yearly_return: flo
         details["volatilite"] = None
         details["maxDrawdown"] = None
 
-    # 2. YÖNETİM BAŞARISI (benchmark yenme oranı)
+    # ── 2. BENCHMARK YENME ORANI (ağırlık %20) ──
     if len(prices) >= 30:
-        # Aylık dönemleri sayarak mevduatı kaç kez yendi
-        wins = 0
-        total_periods = 0
-        period = 21  # ~1 ay
-        for i in range(period, len(prices), period):
-            period_ret = (prices[i] - prices[i-period]) / prices[i-period] * 100
-            if period_ret > mevduat_aylik:
-                wins += 1
-            total_periods += 1
-        
-        win_rate = (wins / total_periods * 100) if total_periods > 0 else 50
-        # Risk cezası: yüksek risk skoru varsa yönetim puanını düşür
-        risk_penalty = (risk_score - 4) * 3 if risk_score > 4 else 0
-        yonetim = round(win_rate - risk_penalty, 1)
-        scores["yonetim"] = min(100, max(0, yonetim))
+        wins, total = 0, 0
+        for i in range(21, len(prices), 21):
+            r = (prices[i]-prices[i-21])/prices[i-21]*100
+            if r > mevduat_aylik: wins += 1
+            total += 1
+        win_rate = (wins/total*100) if total > 0 else 50
+        risk_penalty = (risk_score-4)*3 if risk_score > 4 else 0
+        scores["yonetim"] = min(100, max(0, round(win_rate-risk_penalty, 1)))
         details["benchmarkWinRate"] = round(win_rate, 1)
-        details["riskPenalty"] = risk_penalty
     else:
         scores["yonetim"] = 50
         details["benchmarkWinRate"] = None
 
-    # 3. GİRİŞ ZAMANLAMASI (RSI + fiyat pozisyonu)
+    # ── 3. PARA AKIŞI TRENDİ (ağırlık %15) ──
+    if len(participant_history) >= 5:
+        tv_list = participant_history  # participant proxy
+        pc_change = participant_history[-1] - participant_history[0]
+        pc_pct = (pc_change / participant_history[0] * 100) if participant_history[0] else 0
+        if pc_pct > 20: flow_score = 75
+        elif pc_pct > 5: flow_score = 65
+        elif pc_pct > 0: flow_score = 55
+        elif pc_pct > -5: flow_score = 45
+        else: flow_score = 30
+        scores["para_akisi"] = flow_score
+        details["participantChangePct"] = round(pc_pct, 1)
+    else:
+        scores["para_akisi"] = 50
+        details["participantChangePct"] = None
+
+    # ── 4. RSI + GİRİŞ ZAMANLAMASI (ağırlık %8) ──
     if len(prices) >= 14:
-        # RSI hesapla (14 günlük)
         gains, losses = [], []
         for i in range(1, min(15, len(prices))):
-            diff = prices[-i] - prices[-(i+1)]
+            diff = prices[-i]-prices[-(i+1)]
             if diff > 0: gains.append(diff)
             else: losses.append(abs(diff))
-        
-        avg_gain = sum(gains) / 14 if gains else 0.001
-        avg_loss = sum(losses) / 14 if losses else 0.001
-        rs = avg_gain / avg_loss
-        rsi = round(100 - (100 / (1 + rs)), 1)
-        
-        # RSI yorumu: 30-70 arası ideal giriş, 70+ pahalı, 30- ucuz
-        if rsi < 30:
-            timing_score = 85  # aşırı satım — iyi giriş
-        elif rsi < 50:
-            timing_score = 70  # makul
-        elif rsi < 70:
-            timing_score = 50  # nötr
-        else:
-            timing_score = 20  # aşırı alım — pahalı
-
-        # Katılımcı trendi: son 30g artıyorsa kötü (kalabalık), azalıyorsa iyi
-        if len(participant_history) >= 2:
-            pc_change = participant_history[-1] - participant_history[0]
-            if pc_change > participant_history[0] * 0.1:
-                timing_score -= 15  # çok popüler, geç kalınmış olabilir
-            elif pc_change < 0:
-                timing_score += 10  # çıkış var, ucuzlamış olabilir
-        
+        avg_gain = sum(gains)/14 if gains else 0.001
+        avg_loss = sum(losses)/14 if losses else 0.001
+        rs = avg_gain/avg_loss
+        rsi = round(100-(100/(1+rs)), 1)
+        if rsi < 30: timing_score = 85
+        elif rsi < 50: timing_score = 70
+        elif rsi < 70: timing_score = 50
+        else: timing_score = 20
         scores["zamanlama"] = min(100, max(0, timing_score))
         details["rsi"] = rsi
         details["rsiYorum"] = "Aşırı Satım 🟢" if rsi < 30 else ("Nötr ⚪" if rsi < 70 else "Aşırı Alım 🔴")
@@ -837,26 +823,238 @@ def _calculate_scorecard(prices: list, monthly_return: float, yearly_return: flo
         details["rsi"] = None
         details["rsiYorum"] = "Yetersiz veri"
 
-    # GENEL SKOR
-    overall = round((scores["istikrar"] * 0.35 + scores["yonetim"] * 0.40 + scores["zamanlama"] * 0.25), 1)
-    
+    # ── 5. 6A ORT vs AYLIK GETİRİ — MOMENTUM (ağırlık %5) ──
+    if len(prices) >= 126:
+        monthly_rets = []
+        for i in range(6):
+            e = len(prices)-i*21
+            s = e-21
+            if s >= 0:
+                monthly_rets.append((prices[e-1]-prices[s])/prices[s]*100)
+        avg6m = sum(monthly_rets)/len(monthly_rets) if monthly_rets else 0
+        if monthly_return > avg6m*1.1: mom_score = 75
+        elif monthly_return > avg6m*0.8: mom_score = 60
+        elif monthly_return > 0: mom_score = 45
+        else: mom_score = 25
+        scores["momentum_trend"] = mom_score
+        details["avg6mMonthly"] = round(avg6m, 2)
+    else:
+        scores["momentum_trend"] = 50
+        details["avg6mMonthly"] = None
+
+    # ── 6. EVOLVER: MOMENTUM + VOLATİLİTE TRENDİ (ağırlık %15) ──
+    ev_score = 50
+    ev_details = {}
+    if evolver_data:
+        for m in evolver_data:
+            try:
+                d = json.loads(m.get("content","{}") if isinstance(m, dict) else m.content)
+                mtype = m.get("type","") if isinstance(m, dict) else m.memory_type
+                if mtype == "signal":
+                    mt = d.get("momentum_trend","")
+                    vt = d.get("volatility_trend","")
+                    dt = d.get("drawdown_trend","")
+                    st = d.get("sharpe_trend","")
+                    bonus = 0
+                    if mt in ["güçleniyor","artıyor"]: bonus += 15
+                    elif mt in ["zayıflıyor","azalıyor"]: bonus -= 15
+                    if vt == "azalıyor": bonus += 10
+                    elif vt == "artıyor": bonus -= 10
+                    if dt == "iyileşiyor": bonus += 10
+                    elif dt == "kötüleşiyor": bonus -= 10
+                    if st in ["artıyor","güçleniyor"]: bonus += 5
+                    ev_score = min(100, max(0, 50 + bonus))
+                    ev_details["momentumTrend"] = mt
+                    ev_details["volatilityTrend"] = vt
+                    ev_details["drawdownTrend"] = dt
+            except: pass
+    scores["evolver_trend"] = ev_score
+    details.update(ev_details)
+
+    # ── 7. EVOLVER: SİNYAL DOĞRULUĞU (ağırlık %10) ──
+    acc_score = 50
+    if evolver_data:
+        for m in evolver_data:
+            try:
+                d = json.loads(m.get("content","{}") if isinstance(m, dict) else m.content)
+                mtype = m.get("type","") if isinstance(m, dict) else m.memory_type
+                if mtype == "signal_accuracy":
+                    acc = d.get("accuracy_pct", 50)
+                    total_pred = d.get("total_predictions", 0)
+                    if total_pred >= 5:
+                        acc_score = min(100, max(0, acc))
+                    else:
+                        acc_score = 50  # yetersiz veri
+                    details["signalAccuracy"] = acc
+                    details["totalPredictions"] = total_pred
+            except: pass
+    scores["sinyal_dogrulugu"] = acc_score
+
+    # ── 8. EVOLVER: FON KARAKTERİ — TOPARLANMA HIZI (ağırlık %12) ──
+    recovery_score = 50
+    if evolver_data:
+        for m in evolver_data:
+            try:
+                d = json.loads(m.get("content","{}") if isinstance(m, dict) else m.content)
+                mtype = m.get("type","") if isinstance(m, dict) else m.memory_type
+                if mtype == "fund_character":
+                    avg_rec = d.get("avg_recovery_days", 30)
+                    if avg_rec <= 7: recovery_score = 95
+                    elif avg_rec <= 14: recovery_score = 80
+                    elif avg_rec <= 30: recovery_score = 65
+                    elif avg_rec <= 60: recovery_score = 45
+                    else: recovery_score = 25
+                    details["avgRecoveryDays"] = avg_rec
+                    details["recoveryProfile"] = d.get("recovery_profile","")
+            except: pass
+    scores["toparlanma"] = recovery_score
+
+    # ── KOMPOZİT SKOR (ağırlıklı) ──
+    weights = {
+        "yonetim":         0.20,
+        "para_akisi":      0.15,
+        "istikrar":        0.15,
+        "evolver_trend":   0.15,
+        "toparlanma":      0.12,
+        "sinyal_dogrulugu":0.10,
+        "momentum_trend":  0.05,
+        "zamanlama":       0.08,
+    }
+    overall = round(sum(scores[k]*w for k,w in weights.items()), 1)
+
     def grade(s):
-        if s >= 80: return "A+"
-        if s >= 70: return "A"
-        if s >= 60: return "B+"
-        if s >= 50: return "B"
-        if s >= 40: return "C"
+        if s >= 85: return "A+"
+        if s >= 75: return "A"
+        if s >= 65: return "B+"
+        if s >= 55: return "B"
+        if s >= 45: return "C"
         return "D"
+
+    # Öne çıkan sinyal
+    signal = ""
+    if details.get("rsi") and details["rsi"] > 70:
+        signal = "⚠️ Aşırı alım — giriş için bekle"
+    elif details.get("rsi") and details["rsi"] < 30:
+        signal = "🟢 Aşırı satım — fırsat olabilir"
+    elif ev_details.get("momentumTrend") in ["güçleniyor","artıyor"] and scores.get("yonetim",0) > 70:
+        signal = "🚀 Güçlü momentum + benchmark üstü"
+    elif details.get("maxDrawdown") and details["maxDrawdown"] > 25:
+        signal = "⚠️ Yüksek düşüş riski"
+    elif scores.get("sinyal_dogrulugu",0) > 80 and ev_details.get("momentumTrend") == "güçleniyor":
+        signal = "✅ Güvenilir sinyal + güçlü trend"
 
     return {
         "overall": overall,
         "grade": grade(overall),
         "istikrar": scores["istikrar"],
-        "yonetim": scores["yonetim"], 
+        "yonetim": scores["yonetim"],
         "zamanlama": scores["zamanlama"],
+        "para_akisi": scores["para_akisi"],
+        "evolver_trend": scores["evolver_trend"],
+        "sinyal_dogrulugu": scores["sinyal_dogrulugu"],
+        "toparlanma": scores["toparlanma"],
+        "momentum_trend": scores["momentum_trend"],
+        "signal": signal,
         "details": details
     }
+# Haber cache: {fon_kategorisi: (timestamp, haber_metni)}
+_news_cache: dict = {}
+_NEWS_CACHE_TTL = 3600  # 1 saat
 
+async def _fetch_market_news(fund_type: str, fund_code: str) -> str:
+    """Fon türüne göre güncel piyasa haberlerini çeker. Sonuçları 1 saat cache'ler."""
+    import time
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return ""
+
+    # Fon kategorisini belirle (cache key)
+    fund_type_lower = (fund_type or "").lower()
+    if any(k in fund_type_lower for k in ["hisse", "bist", "equity", "pay"]):
+        category = "hisse"
+    elif any(k in fund_type_lower for k in ["altın", "altin", "kıymetli", "emtia"]):
+        category = "altin"
+    elif any(k in fund_type_lower for k in ["borçlanma", "borclanma", "tahvil", "bono", "kira", "sukuk"]):
+        category = "tahvil"
+    elif any(k in fund_type_lower for k in ["para piyasası", "likit", "mevduat"]):
+        category = "para_piyasasi"
+    elif any(k in fund_type_lower for k in ["yabancı", "foreign", "döviz", "eurobond", "dolar", "euro"]):
+        category = "yabanci"
+    elif any(k in fund_type_lower for k in ["teknoloji", "tech"]):
+        category = "teknoloji"
+    elif any(k in fund_type_lower for k in ["enerji", "petrol"]):
+        category = "enerji"
+    else:
+        category = "genel"
+
+    # Cache'de varsa ve süresi dolmamışsa direkt dön
+    now = time.time()
+    if category in _news_cache:
+        ts, cached_text = _news_cache[category]
+        if now - ts < _NEWS_CACHE_TTL:
+            return cached_text
+
+    # Fon türüne göre arama sorgusu belirle
+    fund_type_lower = (fund_type or "").lower()
+
+    if any(k in fund_type_lower for k in ["hisse", "bist", "equity", "pay"]):
+        query = "BIST Borsa İstanbul güncel haber son gelişme"
+    elif any(k in fund_type_lower for k in ["altın", "altin", "kıymetli", "emtia"]):
+        query = "altın fiyatı dolar TL güncel haber"
+    elif any(k in fund_type_lower for k in ["borçlanma", "borclanma", "tahvil", "bono", "kira", "sukuk"]):
+        query = "TCMB faiz kararı Türkiye tahvil bono piyasası"
+    elif any(k in fund_type_lower for k in ["para piyasası", "likit", "mevduat"]):
+        query = "Türkiye mevduat faizi politika faizi TCMB"
+    elif any(k in fund_type_lower for k in ["yabancı", "foreign", "döviz", "eurobond", "dolar", "euro"]):
+        query = "Fed faiz kararı dolar euro küresel piyasalar"
+    elif any(k in fund_type_lower for k in ["teknoloji", "tech"]):
+        query = "teknoloji hisseleri Nasdaq küresel piyasalar"
+    elif any(k in fund_type_lower for k in ["enerji", "petrol"]):
+        query = "petrol enerji fiyatları OPEC son gelişme"
+    else:
+        # Genel — her fon için işe yarar
+        query = "Türkiye piyasaları BIST dolar faiz güncel haber"
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        loop = asyncio.get_running_loop()
+
+        resp = await loop.run_in_executor(None, lambda: client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=400,
+            tools=[{"type": "web_search_20250305", "name": "web_search"}],
+            system=(
+                "Sen bir finansal haber asistanısın. "
+                "Verilen sorgu için web araması yap ve sonuçlardan "
+                "yalnızca en önemli 3-4 güncel haberi madde madde özetle. "
+                "Her madde tek satır, maksimum 120 karakter. "
+                "Sadece liste döndür, başka hiçbir şey yazma. "
+                "Türkçe yaz."
+            ),
+            messages=[{
+                "role": "user",
+                "content": f"Bugün için şu konuda en önemli 3-4 haberi özetle: {query}"
+            }]
+        ))
+
+        # Yanıttan metin bloklarını topla
+        news_lines = []
+        for block in resp.content:
+            if hasattr(block, "type") and block.type == "text" and block.text:
+                news_lines.append(block.text.strip())
+
+        news_text = "\n".join(news_lines).strip()
+        if not news_text:
+            return ""
+
+        result = f"\nGÜNCEL PİYASA HABERLERİ ({fund_type or 'Genel'}):\n{news_text}"
+        _news_cache[category] = (time.time(), result)
+        return result
+
+    except Exception as e:
+        # Haber çekme başarısız olursa analizi engelleme, sessizce geç
+        return ""
+        
 async def _analyze_tefas(fund_code: str, fund_info: dict, evolver: dict, history: list, top_holdings: list) -> dict:
     """TEFAS + Evolver verisiyle Groq/Llama analizi"""
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
@@ -982,7 +1180,10 @@ SCORECARD (0-100):
     if fund_info.get("portfolioItems"):
         items = fund_info["portfolioItems"]
         alloc_str = "\nPORTFÖY DAĞILIMI: " + ", ".join([i["name"] + " %" + str(i["value"]) for i in items[:5]])
-
+    news_str = await _fetch_market_news(
+        fund_type=fund_info.get("fundType", ""),
+        fund_code=fund_code
+    )
     months_tr = {1:"Ocak",2:"Şubat",3:"Mart",4:"Nisan",5:"Mayıs",6:"Haziran",
                  7:"Temmuz",8:"Ağustos",9:"Eylül",10:"Ekim",11:"Kasım",12:"Aralık"}
     now = datetime.now()
@@ -1000,7 +1201,7 @@ FON VERİLERİ:
 - 6 Aylık Ort. Aylık Getiri: %{avg_6m_monthly if avg_6m_monthly is not None else "?"}
 - Toplam Getiri ({len(prices)} gün): %{total_return}
 - Stopaj: %{fund_info.get("stopajRate", 17.5)} | Valör: {fund_info.get("valor", "T+1/T+2")}
-{scorecard_str}{holdings_str}{alloc_str}{benchmark_str}{anomaly_str}{ev_str}
+{scorecard_str}{holdings_str}{alloc_str}{benchmark_str}{anomaly_str}{ev_str}{news_str}
 
 KURALLAR:
 - Türkçe yaz.
@@ -1010,6 +1211,7 @@ KURALLAR:
 - ANOMALİ SİNYALLERİ varsa bunları mutlaka aiInsights veya dexterRecommendations'a yansıt.
 - Kitlesel para çıkışı veya girişi varsa yatırımcıya bunu açıkça söyle.
 - Veri bulunmayan konuda yorum yapma.
+- GÜNCEL PİYASA HABERLERİ varsa, haberlerin fonu nasıl etkileyebileceğini aiInsights veya dexterRecommendations'a bağla. Haberi kopyalama, fona özgü yorum yap.
 - Her tespit en az bir sayısal veri içermelidir.
 - Genel ifadeler kullanma (örn: güçlü performans, iyi getiri vb.)
 - Her tespit "veri → sonuç" formatında olmalıdır.
@@ -1660,6 +1862,13 @@ async def get_fund_detail(fund_code: str):
     if not records:
         raise HTTPException(404, "Fon bulunamadı")
     r = records[0]
+    # Evolver verisini çek
+    async with AsyncSessionLocal() as ev_session:
+        ev_mems = (await ev_session.execute(
+            select(EvolverMemory).where(EvolverMemory.fund_code == fund_code)
+        )).scalars().all()
+    evolver_list = [{"type": m.memory_type, "content": m.content} for m in ev_mems]
+
     # Fiyat geçmişinden getiri hesapla
     prices = sorted(records, key=lambda x: x.date_key)
     prices_vals = [p.unit_price for p in prices if p.unit_price]
@@ -1707,7 +1916,8 @@ async def get_fund_detail(fund_code: str):
             yearly_return=yearly_return or 0,
             risk_score=r.risk_score or 4,
             participant_history=[rec.participant_count for rec in prices[-30:] if rec.participant_count],
-            mevduat_aylik=3.54
+            mevduat_aylik=3.54,
+            evolver_data=evolver_list
         ) if len(prices_vals) >= 20 else {},
     }
 
@@ -1841,16 +2051,81 @@ async def get_top5():
         prices = [r.unit_price for r in recs]
         participants = [r.participant_count for r in recs]
         total_values = [r.total_value for r in recs]
-        
+
         def ret(n):
             if len(prices) < n: return None
             return round((prices[-1] / prices[-n] - 1) * 100, 2)
-        
-        # Yatırımcı ve para akışı trendi
+
         p30 = round(participants[-1] - participants[-21], 0) if len(participants) >= 21 else None
         p90 = round(participants[-1] - participants[-63], 0) if len(participants) >= 63 else None
         flow30 = round(total_values[-1] - total_values[-21], 0) if len(total_values) >= 21 else None
-        
+
+        # Evolver verilerini çek
+        async with AsyncSessionLocal() as ev_session:
+            ev_mems = (await ev_session.execute(
+                select(EvolverMemory).where(EvolverMemory.fund_code == code)
+            )).scalars().all()
+        ev_by_type = {m.memory_type: m.content for m in ev_mems}
+
+        # Scorecard hesapla
+        sc = _calculate_scorecard(
+            prices=prices,
+            monthly_return=ret(21) or 0,
+            yearly_return=ret(252) or 0,
+            risk_score=recs[-1].risk_score or 4,
+            participant_history=[p for p in participants[-30:] if p],
+            mevduat_aylik=3.54,
+            evolver_data=[{"type": m.memory_type, "content": m.content} for m in ev_mems]
+        ) if len(prices) >= 20 else {}
+
+        # Dexter yön tahmini bonusu — sadece en güncel tahmin
+        dexter_bonus = 0
+        try:
+            # Birden fazla dexter_prediction olabilir, en son tarihliye bak
+            dp_mems = [m for m in ev_mems if m.memory_type == "dexter_prediction"]
+            if dp_mems:
+                latest_dp = max(dp_mems, key=lambda m: json.loads(m.content).get("date",""))
+                dp = json.loads(latest_dp.content)
+                if dp.get("direction") == "bullish": dexter_bonus = 8
+                elif dp.get("direction") == "bearish": dexter_bonus = -8
+        except: pass
+
+        # Sinyal doğruluğu bonusu
+        acc_bonus = 0
+        try:
+            sa = json.loads(ev_by_type.get("signal_accuracy", "{}"))
+            acc = sa.get("accuracy_pct", 50)
+            total_pred = sa.get("total_predictions", 0)
+            if total_pred >= 5:
+                acc_bonus = (acc - 50) * 0.1  # %80 doğruluk → +3 puan
+        except: pass
+
+        # Kompozit top10 skoru — çok boyutlu ağırlıklı formül
+        if sc:
+            r1m = ret(21) or 0
+            r3m = ret(63) or 0
+            # Getiri skoru: aylık getiriyi 0-100 arasına normalize et (-%10 → 0, +%20 → 100)
+            ret_score = max(0, min(100, (r1m + 10) / 30 * 100))
+            # 3 aylık momentum bonusu
+            ret3m_bonus = max(-10, min(10, r3m / 10))
+            # RSI cezası: aşırı alımda giriş riski
+            rsi = sc.get("details", {}).get("rsi", 50) or 50
+            rsi_penalty = max(0, (rsi - 75) * 0.5) if rsi > 75 else 0
+            # Risk cezası: yüksek risk fonlarına ceza
+            risk_penalty = max(0, ((recs[-1].risk_score or 4) - 4) * 2)
+            composite = round(
+                sc.get("overall", 50) * 0.40 +
+                ret_score * 0.25 +
+                sc.get("istikrar", 50) * 0.15 +
+                sc.get("sinyal_dogrulugu", 50) * 0.10 +
+                sc.get("para_akisi", 50) * 0.10 +
+                dexter_bonus + acc_bonus +
+                ret3m_bonus - rsi_penalty - risk_penalty,
+                1
+            )
+        else:
+            composite = None
+
         results.append({
             "code": code,
             "name": recs[-1].fund_name,
@@ -1866,21 +2141,24 @@ async def get_top5():
             "participantChange30d": p30,
             "participantChange90d": p90,
             "moneyFlow30d": flow30,
+            "compositeScore": composite,
+            "scorecard": sc,
             "aiInsights": json.loads(recs[-1].ai_insights or "[]"),
             "dexterRecommendations": json.loads(recs[-1].dexter_recommendations or "[]"),
         })
-    
-    def top5(key):
+
+    def top10(key):
         valid = [r for r in results if r.get(key) is not None]
-        return sorted(valid, key=lambda x: x[key], reverse=True)[:5]
-    
+        return sorted(valid, key=lambda x: x[key], reverse=True)[:10]
+
     return {
-        "top5_1m": top5("return1m"),
-        "top5_3m": top5("return3m"),
-        "top5_6m": top5("return6m"),
-        "top5_1y": top5("return1y"),
-        "top5_flow": top5("moneyFlow30d"),
-        "top5_participants": top5("participantChange30d"),
+        "top5_1m": top10("return1m"),
+        "top5_3m": top10("return3m"),
+        "top5_6m": top10("return6m"),
+        "top5_1y": top10("return1y"),
+        "top5_flow": top10("moneyFlow30d"),
+        "top5_participants": top10("participantChange30d"),
+        "top10_composite": top10("compositeScore"),
     }
 
 
