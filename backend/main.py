@@ -1349,8 +1349,8 @@ KURALLAR:
 
     # Dataset'e otomatik kaydet
     try:
-        import os
-        os.makedirs("/root/FONAR/dataset", exist_ok=True)
+        import os as _os
+        _os.makedirs("/root/FONAR/dataset", exist_ok=True)
         dataset_entry = {
             "fund_code": fund_code,
             "date": datetime.now().strftime("%Y-%m-%d"),
@@ -1362,9 +1362,9 @@ Toplam Getiri ({len(prices)}g): %{total_return}
 Portföy: {round(fund_info.get("totalValue",0)/1e6,1)}M TL
 Yatırımcı: {int(fund_info.get("participantCount",0)):,}
 Risk Skoru: {fund_info.get("riskScore","?")}/7""",
-            "output": "\n".join([f"• {{i}}" for i in ai.get("aiInsights",[])]) +
+            "output": "\n".join(["• " + str(i) for i in ai.get("aiInsights",[])]) +
                       "\n\nÖneriler:\n" +
-                      "\n".join([f"• {{r}}" for r in ai.get("dexterRecommendations",[])]),
+                      "\n".join(["• " + str(r) for r in ai.get("dexterRecommendations",[])]),
             "metadata": {
                 "riskScore": fund_info.get("riskScore"),
                 "fundType": fund_info.get("fundType"),
@@ -1373,8 +1373,8 @@ Risk Skoru: {fund_info.get("riskScore","?")}/7""",
                 "scorecard": scorecard.get("overall"),
             }
         }
-        with open("/root/FONAR/dataset/analyses.jsonl", "a", encoding="utf-8") as f_ds:
-            f_ds.write(json.dumps(dataset_entry, ensure_ascii=False) + "\n")
+        with open("/root/FONAR/dataset/analyses.jsonl", "a", encoding="utf-8") as _f_ds:
+            _f_ds.write(json.dumps(dataset_entry, ensure_ascii=False) + "\n")
     except Exception as _de:
         pass
 
