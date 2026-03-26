@@ -21,6 +21,7 @@ export default function Top5({ onSelectFund }) {
     '1y':  { key: 'top5_1y',           label: 'Son 1 Yıl',              retKey: 'return1y' },
     'flow':{ key: 'top5_flow',         label: 'Para Girişi (30g)',       retKey: 'moneyFlow30d' },
     'part':{ key: 'top5_participants', label: 'Yatırımcı Artışı (30g)', retKey: 'participantChange30d' },
+    'composite': { key: 'top10_composite', label: '🏆 Kompozit Skor', retKey: 'compositeScore' },
   }
 
   const fmt = (v, key) => {
@@ -46,8 +47,8 @@ export default function Top5({ onSelectFund }) {
     <div style={{padding:'24px 28px'}}>
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:24,flexWrap:'wrap',gap:12}}>
         <div>
-          <div style={{fontWeight:800,fontSize:20,marginBottom:4}}>🏆 Top 5 Fon</div>
-          <div style={{color:'#475569',fontSize:12}}>Takip ettiğin fonlar arasında dönemsel sıralama</div>
+          <div style={{fontWeight:800,fontSize:20,marginBottom:4}}>🏆 Top 10 Fon</div>
+          <div style={{color:'#475569',fontSize:12}}>Takip ettiğin fonlar arasında dönemsel sıralama — Top 10</div>
         </div>
         <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
           {Object.entries(periodMap).map(([k,v]) => (
@@ -69,7 +70,7 @@ export default function Top5({ onSelectFund }) {
             <div style={{width:36,height:36,borderRadius:10,flexShrink:0,
               background: i===0?'linear-gradient(135deg,#FFD700,#FFA500)':i===1?'linear-gradient(135deg,#C0C0C0,#A8A8A8)':i===2?'linear-gradient(135deg,#CD7F32,#8B4513)':'#1e293b',
               display:'flex',alignItems:'center',justifyContent:'center',fontWeight:800,fontSize:16}}>
-              {i===0?'🥇':i===1?'🥈':i===2?'🥉':i+1}
+              {i===0?'🥇':i===1?'🥈':i===2?'🥉':`${i+1}.`}
             </div>
             <div style={{background:'rgba(0,194,168,0.1)',border:'1px solid rgba(0,194,168,0.2)',
               borderRadius:8,padding:'4px 10px',fontWeight:700,fontSize:13,color:'#00C2A8',flexShrink:0,minWidth:48,textAlign:'center'}}>

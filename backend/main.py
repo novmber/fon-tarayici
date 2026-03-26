@@ -1468,6 +1468,19 @@ async def refresh_fund(fund_code: str):
             select(FundRecord.date_key).where(FundRecord.fund_code == fund_code)
         )).fetchall())
         new_count = 0
+        # Mevcut en son analiz verisini bul — yeni kayıtlara kopyalanacak
+        last_analysis = (await session.execute(
+            select(FundRecord).where(
+                FundRecord.fund_code == fund_code,
+                FundRecord.ai_insights != "[]",
+                FundRecord.ai_insights != None,
+            ).order_by(desc(FundRecord.date_key)).limit(1)
+        )).scalar_one_or_none()
+        saved_ai = last_analysis.ai_insights if last_analysis else "[]"
+        saved_dexter = last_analysis.dexter_recommendations if last_analysis else "[]"
+        saved_twitter = last_analysis.twitter_summary if last_analysis else ""
+        saved_expenses = last_analysis.expenses if last_analysis else "{}"
+
         for row in rows:
             d = _ts_to_date(row.get("TARIH", ""))
             if not d or d in existing:
@@ -1485,6 +1498,10 @@ async def refresh_fund(fund_code: str):
                 valor=fund_info.get("VALÖR") or fund_info.get("VALOR"),
                 fund_type=fund_info.get("FONTUR"),
                 top_holdings=json.dumps(top_holdings, ensure_ascii=False),
+                ai_insights=saved_ai,
+                dexter_recommendations=saved_dexter,
+                twitter_summary=saved_twitter,
+                expenses=saved_expenses,
             ))
             new_count += 1
         # Fiyat geçmişinden aylık/yıllık getiri hesapla
@@ -2189,12 +2206,12 @@ async def get_daily_tweets():
                  7:"Temmuz",8:"Ağustos",9:"Eylül",10:"Ekim",11:"Kasım",12:"Aralık"}
     now = datetime.now()
     ay = f"{months_tr[now.month]} {now.year}"
-    medals = ["🥇","🥈","🥉","4️⃣","5️⃣"]
+    medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
 
     tweets = []
 
     # ── TWEET 1: Top 5 Aylık Getiri ──
-    lines = [f"{medals[i]} ${f['code']} +{f['return1m']:.1f}% — {f['name'].split()[0]} {f['name'].split()[1] if len(f['name'].split())>1 else ''}" for i, f in enumerate(top5_1m)]
+    lines = [f"{medals[i]} ${f['code']} +{f['return1m']:.1f}% — {f['name'].split()[0]} {f['name'].split()[1] if len(f['name'].split())>1 else ''}" for i, f in enumerate(top5_1m[:5])]
     if afo_ret and afo_ret > 0:
         bench = f"\nAltın (AFO) aynı dönemde: +{afo_ret:.1f}%"
     elif afo_ret and afo_ret < 0:
