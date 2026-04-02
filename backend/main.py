@@ -66,6 +66,7 @@ class FundRecord(Base):
     dexter_recommendations: Mapped[str] = mapped_column(Text, default="[]")
     twitter_summary: Mapped[str] = mapped_column(Text, default="")
     raw_pdf_text: Mapped[str] = mapped_column(Text, default="")
+    pdf_summary: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     published: Mapped[Optional[int]] = mapped_column(Integer, default=0, nullable=True)
 
@@ -572,8 +573,65 @@ async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
                 memory_type="signal",
                 content=signal_content,
                 confidence=0.5,
-                snapshot_date=today,
+                snapshot_date=today_str,
             ))
+
+        # Haber sinyali — Claude web search + Qwen analiz
+        try:
+            from sqlalchemy import text as sa_text
+            fn_ex = await session.execute(sa_text("SELECT fund_name FROM fund_records WHERE fund_code=:c LIMIT 1"), {"c": fund_code})
+            ft_ex = await session.execute(sa_text("SELECT fund_type FROM fund_records WHERE fund_code=:c LIMIT 1"), {"c": fund_code})
+            fund_name_row = fn_ex.scalar_one_or_none() or fund_code
+            fund_type_row = ft_ex.scalar_one_or_none() or ""
+
+            # Claude web search ile güncel haberler çek (cache'li)
+            raw_news = await _fetch_market_news(fund_type=fund_type_row, fund_code=fund_code)
+            import logging as _lg
+            _lg.warning(f"NEWS_DEBUG [{fund_code}] fund_type={fund_type_row!r} raw_news_len={len(raw_news)}")
+
+            # Qwen ile haber → sinyal
+            news_sig = {"signal": "nötr", "confidence": 0.5, "reason": "", "source": "rule_based"}
+            if raw_news and len(raw_news) > 30:
+                qwen_prompt = f"""Aşağıdaki piyasa haberleri "{fund_name_row}" ({fund_type_row}) yatırım fonu için olumlu mu, olumsuz mu?
+Sadece JSON döndür, başka hiçbir şey yazma:
+{{"signal": "pozitif|negatif|nötr|uyarı", "confidence": 0.0-1.0, "reason": "max 80 karakter Türkçe açıklama"}}
+
+Haberler:
+{raw_news[:800]}"""
+                try:
+                    import httpx as _httpx, logging as _lg2
+                    async with _httpx.AsyncClient(timeout=60) as _hc:
+                        _resp = await _hc.post("http://localhost:11434/api/generate", json={
+                            "model": "qwen2.5:3b", "prompt": qwen_prompt, "stream": False,
+                            "options": {"temperature": 0.1, "num_predict": 80}
+                        })
+                        _text = _resp.json().get("response", "")
+                        _lg2.warning(f"QWEN_RAW [{fund_code}]: {repr(_text[:100])}")
+                        import re as _re
+                        _m = _re.search(r'\{.*\}', _text, _re.DOTALL)
+                        if _m:
+                            _parsed = json.loads(_m.group())
+                            news_sig = {
+                                "signal": _parsed.get("signal", "nötr"),
+                                "confidence": float(_parsed.get("confidence", 0.5)),
+                                "reason": _parsed.get("reason", ""),
+                                "source": "qwen+claude_search"
+                            }
+                except Exception as _qe:
+                    import logging as _lg3
+                    _lg3.warning(f"QWEN_HATA [{fund_code}]: {_qe}")
+
+            ns_content = json.dumps({"signal": news_sig.get("signal","nötr"), "confidence": news_sig.get("confidence",0.5), "reason": news_sig.get("reason",""), "matched": [], "source": news_sig.get("source","rule_based"), "date": today_str, "news_snippet": raw_news[:300] if raw_news else ""}, ensure_ascii=False)
+            ns_ex = await session.execute(select(EvolverMemory).where(EvolverMemory.fund_code == fund_code, EvolverMemory.memory_type == "news_signal"))
+            ns_rec = ns_ex.scalar_one_or_none()
+            if ns_rec:
+                ns_rec.content = ns_content
+                ns_rec.last_seen = datetime.utcnow()
+                ns_rec.confidence = news_sig.get("confidence", 0.5)
+            else:
+                session.add(EvolverMemory(fund_code=fund_code, memory_type="news_signal", content=ns_content, confidence=news_sig.get("confidence",0.5), snapshot_date=today))
+        except Exception as _e:
+            print(f"Haber sinyali hatası {fund_code}: {_e}")
     # ─── FON KARAKTERİ ───────────────────────────────────────────────────────
     if len(prices) >= 60:
         char = {}
@@ -653,6 +711,38 @@ async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
 
     await session.commit()
 
+
+# ─── HABERLER ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/news")
+async def get_news(limit: int = 20):
+    """Genel finans haberleri"""
+    try:
+        import sys
+        sys.path.insert(0, '/root/FONAR/fon-tarayici/backend')
+        from news_fetcher import fetch_all_news
+        news = fetch_all_news(limit)
+        return {"success": True, "news": news, "count": len(news)}
+    except Exception as e:
+        return {"success": False, "error": str(e), "news": []}
+
+@app.get("/api/news/{fund_code}")
+async def get_fund_news(fund_code: str):
+    """Fona özel haberler"""
+    try:
+        import sys
+        sys.path.insert(0, '/root/FONAR/fon-tarayici/backend')
+        from news_fetcher import fetch_fund_news
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(FundRecord.fund_name).where(FundRecord.fund_code == fund_code.upper()).limit(1)
+            )
+            row = result.scalar_one_or_none()
+            fund_name = row or fund_code
+        news = fetch_fund_news(fund_name, fund_code)
+        return {"success": True, "news": news, "fund_code": fund_code}
+    except Exception as e:
+        return {"success": False, "error": str(e), "news": []}
 
 # ─── CLAUDE ────────────────────────────────────────────────────────────────────
 
@@ -738,6 +828,128 @@ JSON (başka hiçbir şey yazma):
 
 
 
+
+
+async def _qwen_analyze_pdf(fund_code: str, fund_name: str, pdf_text: str, parsed: dict) -> str:
+    """Qwen ile PDF'den özet çıkar — Claude'a gitmeden önce zenginleştir"""
+    try:
+        monthly = parsed.get("monthlyReturn", "?")
+        yearly = parsed.get("yearlyReturn", "?")
+        mgmt = parsed.get("managementFee", "?")
+        expense = parsed.get("totalExpenseRatio", "?")
+
+        prompt = f"""Sen bir Türk yatırım fonu analistisin. Aşağıdaki KAP raporundan 5 madde halinde özet çıkar.
+Her madde "• " ile başlasın, Türkçe olsun, sayısal veri içersin, maksimum 120 karakter olsun.
+Sadece PDF'deki gerçek verileri kullan.
+
+FON: {fund_code} | {fund_name}
+Aylık Getiri: %{monthly} | Yıllık Getiri: %{yearly}
+Yönetim Ücreti: %{mgmt} | Toplam Gider: %{expense}
+
+PDF METNİ (ilk 1500 karakter):
+{pdf_text[:1500]}
+
+5 maddelik özet:"""
+
+        import httpx
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                "http://localhost:11434/api/generate",
+                json={"model": "qwen2.5:3b", "prompt": prompt, "stream": False, "options": {"num_predict": 300}}
+            )
+            result = resp.json()
+            summary = result.get("response", "").strip()
+            # Sadece • ile başlayan satırları al
+            lines = [l.strip() for l in summary.split("\n") if l.strip().startswith("•")]
+            return "\n".join(lines[:5]) if lines else summary[:600]
+    except Exception as e:
+        return ""
+
+def _parse_pdf_numbers(text: str) -> dict:
+    """KAP PDF'inden satir bazli sayisal verileri cikar"""
+    import re
+    result = {}
+    lines = text.split("\n")
+
+    def get_next_number(lines, keyword, search_range=20):
+        """Keyword iceren satirdan sonraki ilk sayisal degeri bul"""
+        for i, line in enumerate(lines):
+            if keyword.lower() in line.lower():
+                for j in range(i+1, min(i+search_range, len(lines))):
+                    m = re.match(r"^\s*([-\d.,]+)\s*%?\s*$", lines[j].strip())
+                    if m:
+                        try:
+                            return float(m.group(1).replace(".", "").replace(",", "."))
+                        except: pass
+        return None
+
+    def get_pct_after(lines, keyword, search_range=5):
+        """Keyword iceren satirdan sonraki ilk % degerini bul"""
+        for i, line in enumerate(lines):
+            if keyword.lower() in line.lower():
+                for j in range(i+1, min(i+search_range, len(lines))):
+                    m = re.search(r"([-\d,]+)\s*%", lines[j])
+                    if m:
+                        try:
+                            return float(m.group(1).replace(",", "."))
+                        except: pass
+        return None
+
+    # Ay sonu ve onceki ay fiyatindan getiri hesapla
+    price_a = get_next_number(lines, "A-)Ay Sonu Pay Fiyat")
+    price_b = get_next_number(lines, "B-)Önceki Ay Pay Fiyat")
+    if price_a and price_b and price_b > 0:
+        result["monthlyReturn"] = round((price_a - price_b) / price_b * 100, 2)
+
+    # Yillik getiri — E satirindan sonraki sayi
+    yearly = get_next_number(lines, "E-)Yıllık Pay Fiyatı Artış")
+    if yearly is not None:
+        result["yearlyReturn"] = yearly
+
+    # Ay/yil tespiti
+    months_tr = {
+        "ocak":"01","şubat":"02","subat":"02","mart":"03","nisan":"04",
+        "mayıs":"05","mayis":"05","haziran":"06","temmuz":"07",
+        "ağustos":"08","agustos":"08","eylül":"09","eylul":"09",
+        "ekim":"10","kasım":"11","kasim":"11","aralık":"12","aralik":"12"
+    }
+    for line in lines[:10]:
+        for mn, mv in months_tr.items():
+            m = re.search(rf"({mn})[-\s]*(\d{{4}})", line, re.IGNORECASE)
+            if m:
+                result["month"] = f"{m.group(1).capitalize()} {m.group(2)}"
+                result["monthKey"] = f"{m.group(2)}-{mv}"
+                break
+        if "monthKey" in result:
+            break
+
+    # Yonetim ucreti — "Fon Yönetim Ücreti" sonrasi % degeri
+    mgmt = get_pct_after(lines, "Fon Yönetim Ücreti", 3)
+    if mgmt is not None:
+        result["managementFee"] = round(mgmt * 12, 4)
+
+    # Saklama ucreti
+    custody = get_pct_after(lines, "Portföydeki Varlıkların Saklanması", 4)
+    if custody is not None:
+        result["custodyFee"] = round(custody * 12, 4)
+
+    # Toplam gider — tum % degerlerini topla (gider tablosundaki)
+    for i, line in enumerate(lines):
+        if "V-AY İÇİNDE YAPILAN GİDERLER" in line or "AY ICERISINDE YAPILAN GIDERLER" in line.upper():
+            pcts = []
+            for j in range(i+1, min(i+60, len(lines))):
+                m = re.search(r"^(\d+,\d+)\s*%", lines[j].strip())
+                if m:
+                    try: pcts.append(float(m.group(1).replace(",", ".")))
+                    except: pass
+            if pcts:
+                result["totalExpenseRatio"] = round(sum(pcts) * 12, 4)
+            break
+
+    return result
+
+
+
 def _calculate_scorecard(prices: list, monthly_return: float, yearly_return: float,
                           risk_score: int, participant_history: list,
                           mevduat_aylik: float = 3.54, evolver_data: list = None) -> dict:
@@ -749,7 +961,7 @@ def _calculate_scorecard(prices: list, monthly_return: float, yearly_return: flo
 
     # ── 1. MAX DRAWDOWN + VOLATİLİTE (ağırlık %15) ──
     if len(prices) >= 20:
-        returns = [(prices[i]-prices[i-1])/prices[i-1]*100 for i in range(1, len(prices))]
+        returns = [(prices[i]-prices[i-1])/prices[i-1]*100 for i in range(1, len(prices)) if prices[i-1] > 0]
         avg_r = sum(returns)/len(returns)
         variance = sum((r-avg_r)**2 for r in returns)/len(returns)
         volatility = math.sqrt(variance)
@@ -969,7 +1181,32 @@ async def _fetch_market_news(fund_type: str, fund_code: str) -> str:
         return ""
 
     # Fon kategorisini belirle (cache key)
+    # fund_type None ise fund_code'dan tahmin et (fon adı fund_type yerine geçebilir)
     fund_type_lower = (fund_type or "").lower()
+    # fund_code ile DB'den fon adını çekip ona göre kategori belirle
+    if not fund_type_lower.strip() or any(x in fund_type_lower for x in ["serbest", "değişken", "karma", "fon sepeti"]) or fund_type_lower.strip() == "":
+        try:
+            import sqlite3 as _sq
+            _conn = _sq.connect('/root/FONAR/fon-tarayici/data/fon.db')
+            _row = _conn.execute("SELECT fund_name, fund_type FROM fund_records WHERE fund_code=? LIMIT 1", (fund_code,)).fetchone()
+            _conn.close()
+            if _row:
+                _combined = (((_row[1] or "") + " " + (_row[0] or ""))).lower()
+                if any(k in _combined for k in ["hisse", "bist", "equity", "yoğun"]):
+                    fund_type_lower = "hisse senedi fonu"
+                elif any(k in _combined for k in ["altın", "altin", "gold"]):
+                    fund_type_lower = "altın fonu"
+                elif any(k in _combined for k in ["tahvil", "bono", "borçlanma"]):
+                    fund_type_lower = "tahvil fonu"
+                elif any(k in _combined for k in ["para piyasası", "likit"]):
+                    fund_type_lower = "para piyasası fonu"
+                elif any(k in _combined for k in ["döviz", "dolar", "euro", "yabancı"]):
+                    fund_type_lower = "döviz fonu"
+                elif any(k in _combined for k in ["enerji", "petrol"]):
+                    fund_type_lower = "enerji fonu"
+                elif any(k in _combined for k in ["teknoloji", "tech", "çip"]):
+                    fund_type_lower = "teknoloji fonu"
+        except: pass
     if any(k in fund_type_lower for k in ["hisse", "bist", "equity", "pay"]):
         category = "hisse"
     elif any(k in fund_type_lower for k in ["altın", "altin", "kıymetli", "emtia"]):
@@ -997,23 +1234,33 @@ async def _fetch_market_news(fund_type: str, fund_code: str) -> str:
     # Fon türüne göre arama sorgusu belirle
     fund_type_lower = (fund_type or "").lower()
 
-    if any(k in fund_type_lower for k in ["hisse", "bist", "equity", "pay"]):
+    if any(k in fund_type_lower for k in ["hisse", "bist", "equity", "pay", "yoğun"]):
         query = "BIST Borsa İstanbul güncel haber son gelişme"
+        category = "hisse"
     elif any(k in fund_type_lower for k in ["altın", "altin", "kıymetli", "emtia"]):
         query = "altın fiyatı dolar TL güncel haber"
+        category = "altin"
     elif any(k in fund_type_lower for k in ["borçlanma", "borclanma", "tahvil", "bono", "kira", "sukuk"]):
         query = "TCMB faiz kararı Türkiye tahvil bono piyasası"
+        category = "tahvil"
     elif any(k in fund_type_lower for k in ["para piyasası", "likit", "mevduat"]):
         query = "Türkiye mevduat faizi politika faizi TCMB"
+        category = "para_piyasasi"
     elif any(k in fund_type_lower for k in ["yabancı", "foreign", "döviz", "eurobond", "dolar", "euro"]):
         query = "Fed faiz kararı dolar euro küresel piyasalar"
+        category = "yabanci"
     elif any(k in fund_type_lower for k in ["teknoloji", "tech"]):
         query = "teknoloji hisseleri Nasdaq küresel piyasalar"
+        category = "teknoloji"
     elif any(k in fund_type_lower for k in ["enerji", "petrol"]):
         query = "petrol enerji fiyatları OPEC son gelişme"
-    else:
-        # Genel — her fon için işe yarar
+        category = "enerji"
+    elif any(k in fund_type_lower for k in ["değişken", "degisken", "serbest", "karma", "fon sepeti"]):
         query = "Türkiye piyasaları BIST dolar faiz güncel haber"
+        category = "karma"
+    else:
+        query = "Türkiye piyasaları BIST dolar faiz güncel haber"
+        category = "genel"
 
     try:
         client = anthropic.Anthropic(api_key=api_key)
@@ -1180,6 +1427,12 @@ SCORECARD (0-100):
     if fund_info.get("portfolioItems"):
         items = fund_info["portfolioItems"]
         alloc_str = "\nPORTFÖY DAĞILIMI: " + ", ".join([i["name"] + " %" + str(i["value"]) for i in items[:5]])
+
+    # PDF özeti varsa prompt'a ekle
+    pdf_str = ""
+    pdf_sum = fund_info.get("pdfSummary", "")
+    if pdf_sum and len(pdf_sum) > 20:
+        pdf_str = f"\nKAP PDF ANALİZİ (Qwen):\n{pdf_sum}"
     news_str = await _fetch_market_news(
         fund_type=fund_info.get("fundType", ""),
         fund_code=fund_code
@@ -1201,7 +1454,7 @@ FON VERİLERİ:
 - 6 Aylık Ort. Aylık Getiri: %{avg_6m_monthly if avg_6m_monthly is not None else "?"}
 - Toplam Getiri ({len(prices)} gün): %{total_return}
 - Stopaj: %{fund_info.get("stopajRate", 17.5)} | Valör: {fund_info.get("valor", "T+1/T+2")}
-{scorecard_str}{holdings_str}{alloc_str}{benchmark_str}{anomaly_str}{ev_str}{news_str}
+{scorecard_str}{holdings_str}{alloc_str}{benchmark_str}{anomaly_str}{ev_str}{news_str}{pdf_str}
 
 KURALLAR:
 - Türkçe yaz.
@@ -1724,6 +1977,9 @@ async def analyze_pdf(fund_code: str, file: UploadFile = File(...)):
     if len(pdf_text.strip()) < 100:
         raise HTTPException(422, "PDF'den metin çıkarılamadı")
 
+    # Python parser ile sayısal verileri çıkar — Claude yok, token sıfır
+    parsed = _parse_pdf_numbers(pdf_text)
+
     async with AsyncSessionLocal() as session:
         latest = (await session.execute(
             select(FundRecord).where(FundRecord.fund_code == fund_code)
@@ -1732,18 +1988,30 @@ async def analyze_pdf(fund_code: str, file: UploadFile = File(...)):
         if not latest:
             raise HTTPException(404, f"{fund_code} için önce 'Fon Ekle' ile TEFAS verisi çekin")
 
-        history_records = (await session.execute(
-            select(FundRecord).where(FundRecord.fund_code == fund_code).order_by(FundRecord.date_key)
-        )).scalars().all()
-        history = [{"date_key": r.date_key, "unit_price": r.unit_price, "total_value": r.total_value}
-                   for r in history_records]
-        evolver = await (async_get_evolver := session.execute(
-            select(EvolverMemory).where(EvolverMemory.fund_code == fund_code).order_by(EvolverMemory.confidence.desc()).limit(10)
-        ))
-        evolver_mems = evolver.scalars().all()
-
-        tefas_ctx = {"price": latest.unit_price, "total_value": latest.total_value or 0, "participants": latest.participant_count or 0}
-        ai = await _analyze(pdf_text, fund_code, tefas_ctx, history, evolver_mems)
+        # ai dict'ini parsed verilerden oluştur — AI analiz yok
+        ai = {
+            "monthlyReturn": parsed.get("monthlyReturn"),
+            "yearlyReturn":  parsed.get("yearlyReturn"),
+            "month":         parsed.get("month", ""),
+            "monthKey":      parsed.get("monthKey", latest.month_key),
+            "expenses": {
+                "managementFee":    parsed.get("managementFee", 1.75),
+                "custodyFee":       parsed.get("custodyFee", 0.09),
+                "totalExpenseRatio":parsed.get("totalExpenseRatio", 0.22),
+            },
+            "aiInsights": [],
+            "dexterRecommendations": [],
+            "twitterSummary": "",
+            "portfolioItems": [],
+            "topHoldings": [],
+            "riskScore": latest.risk_score,
+            "stopajRate": latest.stopaj_rate,
+            "valor": latest.valor,
+            "fundType": latest.fund_type,
+            "pdfParsed": True,
+            "cashInflow": parsed.get("cashInflow"),
+            "cashOutflow": parsed.get("cashOutflow"),
+        }
 
         # Ay bazlı en yakın kaydı bul
         month_key = ai.get("monthKey", latest.month_key)
@@ -1783,6 +2051,22 @@ async def analyze_pdf(fund_code: str, file: UploadFile = File(...)):
         target.dexter_recommendations = json.dumps(ai.get("dexterRecommendations", []), ensure_ascii=False)
         target.twitter_summary = ai.get("twitterSummary", "")
         target.raw_pdf_text = pdf_text[:5000]
+        # Qwen ile PDF özeti oluştur ve kaydet
+        try:
+            qwen_summary = await _qwen_analyze_pdf(
+                fund_code=fund_code,
+                fund_name=ai.get("fundName", ""),
+                pdf_text=pdf_text,
+                parsed=parsed
+            )
+            import logging
+            logging.warning(f"QWEN SUMMARY [{fund_code}]: {repr(qwen_summary[:100]) if qwen_summary else 'BOŞ'}")
+        except Exception as qe:
+            import logging
+            logging.warning(f"QWEN HATA [{fund_code}]: {qe}")
+            qwen_summary = ""
+        if qwen_summary:
+            target.pdf_summary = qwen_summary
         if ai.get("portfolioItems"):
             target.portfolio_items = json.dumps(ai["portfolioItems"], ensure_ascii=False)
         await session.commit()
@@ -1894,6 +2178,7 @@ async def get_funds():
             "monthlyReturn": r.monthly_return, "yearlyReturn": r.yearly_return,
             "riskScore": r.risk_score, "fundType": r.fund_type,
             "hasPdfAnalysis": bool(r.has_pdf_analysis),
+                "pdfSummary": r.pdf_summary or "",
             "portfolioItems": json.loads(r.portfolio_items or "[]"),
             "aiInsights": json.loads(r.ai_insights or "[]"),
             "twitterSummary": r.twitter_summary,
@@ -1939,6 +2224,7 @@ async def get_fund_detail(fund_code: str):
         "riskScore": r.risk_score, "stopajRate": r.stopaj_rate,
         "valor": r.valor, "fundType": r.fund_type,
         "hasPdfAnalysis": bool(r.has_pdf_analysis),
+                "pdfSummary": r.pdf_summary or "",
         "portfolioItems": json.loads(r.portfolio_items or "[]"),
         "topHoldings": json.loads(r.top_holdings or "[]"),
         "expenses": json.loads(r.expenses or "{}"),
@@ -2069,6 +2355,59 @@ with urllib.request.urlopen(req, timeout=15) as r:
         "returncode": result.returncode,
         "preview": result.stdout[:100] if result.stdout else "BOŞ"
     }
+
+@app.post("/api/funds/refresh-all")
+async def refresh_all_funds():
+    """Tüm fonlara haber sinyali + evolver güncelle — TEFAS'a gitme"""
+    import asyncio, sys as _sys
+    from datetime import date as _date
+    _sys.path.insert(0, '/root/FONAR/fon-tarayici/backend')
+    from news_fetcher import fetch_all_news
+    from news_signal import get_news_signal
+    from sqlalchemy import text as _sat
+
+    # Haberleri bir kere çek
+    news_list = fetch_all_news(20)
+    today = _date.today().isoformat()
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(_sat("SELECT DISTINCT fund_code, fund_name, fund_type FROM fund_records"))
+        funds = result.fetchall()
+
+    results = []
+    for fund_code, fund_name, fund_type in funds:
+        try:
+            sig = await get_news_signal(news_list, fund_name or fund_code, fund_type or "")
+            ns_content = json.dumps({
+                "signal": sig.get("signal","nötr"),
+                "confidence": sig.get("confidence",0.5),
+                "reason": sig.get("reason",""),
+                "matched": sig.get("matched",[]),
+                "source": sig.get("source","rule_based"),
+                "date": today
+            }, ensure_ascii=False)
+            async with AsyncSessionLocal() as session:
+                ns_ex = await session.execute(select(EvolverMemory).where(
+                    EvolverMemory.fund_code == fund_code,
+                    EvolverMemory.memory_type == "news_signal"))
+                ns_rec = ns_ex.scalar_one_or_none()
+                if ns_rec:
+                    ns_rec.content = ns_content
+                    ns_rec.confidence = sig.get("confidence",0.5)
+                    ns_rec.last_seen = datetime.utcnow()
+                else:
+                    session.add(EvolverMemory(
+                        fund_code=fund_code, memory_type="news_signal",
+                        content=ns_content, confidence=sig.get("confidence",0.5),
+                        snapshot_date=_date.today()))
+                await session.commit()
+            results.append({"code": fund_code, "success": True, "signal": sig.get("signal")})
+        except Exception as e:
+            results.append({"code": fund_code, "success": False, "error": str(e)})
+        await asyncio.sleep(0.1)
+
+    success = sum(1 for r in results if r["success"])
+    return {"success": True, "total": len(funds), "successful": success, "results": results}
 
 @app.get("/api/stats")
 async def get_stats():
