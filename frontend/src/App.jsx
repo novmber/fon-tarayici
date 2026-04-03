@@ -38,6 +38,12 @@ export default function App() {
   }, [])
 
   useEffect(() => { load() }, [load])
+  
+  // Her 5 dakikada bir otomatik güncelle
+  useEffect(() => {
+    const interval = setInterval(() => { load() }, 5 * 60 * 1000)
+    return () => clearInterval(interval)
+  }, [load])
 
   const handleTrack = async () => {
     const code = trackInput.trim().toUpperCase()
