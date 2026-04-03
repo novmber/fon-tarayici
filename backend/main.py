@@ -118,10 +118,11 @@ async def startup():
 
                     if new_rows == 0 and price_before == price_after:
                         print(f"  ⏭️ {code} fiyat değişmedi, analiz atlandı")
+                        await _asyncio.sleep(3)
                         continue
 
                     print(f"  ✅ {code} fiyat güncellendi ({new_rows} yeni kayıt)")
-                    await _asyncio.sleep(2)
+                    await _asyncio.sleep(5)
             except Exception as e:
                 err_str = str(e)
                 if "429" in err_str or "rate_limit" in err_str.lower():
@@ -209,7 +210,7 @@ async def _tefas_history(fund_code: str, days: int = 365) -> list:
         except Exception as ex:
             print(f"⚠️  TEFAS chunk ({fund_code} {s}-{e}): {ex}")
         cursor = chunk_end + timedelta(days=1)
-        import time; time.sleep(0.3)
+        import time; time.sleep(2)
     return all_data
 
 
