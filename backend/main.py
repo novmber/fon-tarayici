@@ -25,6 +25,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ── TCMB politika faizi — .env'den al, yoksa güncel varsayılan ──
+TCMB_POLICY_RATE = float(os.getenv("TCMB_POLICY_RATE", "42.5"))
+MEVDUAT_AYLIK = round(TCMB_POLICY_RATE / 12, 2)
+
 BASE_DIR = Path(__file__).parent.parent
 DB_PATH = BASE_DIR / "data" / "fon.db"
 DB_PATH.parent.mkdir(exist_ok=True)
@@ -95,11 +99,12 @@ async def startup():
     print("✅ Database hazır:", DB_PATH)
 
     async def nightly_refresh():
-        print("🔄 11:30 otomatik güncelleme başladı...")
+        print("🔄 23:30 otomatik güncelleme başladı...")
         async with AsyncSessionLocal() as session:
             result = await session.execute(select(FundRecord.fund_code).distinct())
             codes = [r[0] for r in result.fetchall()]
         import asyncio as _asyncio
+        import re as _re
         for code in codes:
             try:
                 import httpx
@@ -121,31 +126,45 @@ async def startup():
                         await _asyncio.sleep(3)
                         continue
 
-                    print(f"  ✅ {code} fiyat güncellendi ({new_rows} yeni kayıt)")
+                    print(f"  ✅ {code} fiyat güncellendi ({new_rows} yeni kayıt), analiz başlıyor...")
                     await _asyncio.sleep(5)
-            except Exception as e:
-                err_str = str(e)
-                if "429" in err_str or "rate_limit" in err_str.lower():
-                    import re
-                    wait_match = re.search(r'try again in (\d+)m', err_str)
-                    wait_min = int(wait_match.group(1)) + 1 if wait_match else 2
-                    raise HTTPException(429, f"AI analiz limiti doldu, {wait_min} dakika sonra tekrar deneyin")
+
+                    # Fiyat değişti → AI analizi de güncelle
                     try:
                         async with httpx.AsyncClient() as client2:
-                            await client2.post(f"http://localhost:9009/api/funds/{code}/analyze-tefas", timeout=120)
-                            print(f"  🤖 {code} analiz tamamlandı (retry)")
-                    except Exception as e2:
-                        print(f"  ❌ {code} retry hata: {e2}")
-                else:
-                    print(f"  ❌ {code} hata: {e}")
+                            analyze_res = await client2.post(
+                                f"http://localhost:9009/api/funds/{code}/analyze-tefas", timeout=120
+                            )
+                            if analyze_res.status_code == 200:
+                                print(f"  🤖 {code} analiz tamamlandı")
+                            else:
+                                print(f"  ⚠️ {code} analiz HTTP {analyze_res.status_code}")
+                    except Exception as ae:
+                        ae_str = str(ae)
+                        if "429" in ae_str or "rate_limit" in ae_str.lower():
+                            wait_match = _re.search(r'try again in (\d+)m', ae_str)
+                            wait_min = int(wait_match.group(1)) + 1 if wait_match else 3
+                            print(f"  ⏳ {code} rate limit — {wait_min}dk bekleniyor")
+                            await _asyncio.sleep(wait_min * 60)
+                            # Bir kez daha dene
+                            try:
+                                async with httpx.AsyncClient() as client3:
+                                    await client3.post(f"http://localhost:9009/api/funds/{code}/analyze-tefas", timeout=120)
+                                    print(f"  🤖 {code} analiz tamamlandı (retry)")
+                            except Exception as e2:
+                                print(f"  ❌ {code} retry analiz hata: {e2}")
+                        else:
+                            print(f"  ❌ {code} analiz hata: {ae}")
+            except Exception as e:
+                print(f"  ❌ {code} refresh hata: {e}")
         print(f"✅ Tamamlandı. {len(codes)} fon güncellendi ve analiz edildi.")
         import subprocess
         subprocess.Popen(["/bin/bash", "/root/FONAR/export-public.sh"])
         print("📤 Fonar export başlatıldı")
 
-    scheduler.add_job(nightly_refresh, CronTrigger(hour=11, minute=30), id="nightly_refresh", replace_existing=True)
+    scheduler.add_job(nightly_refresh, CronTrigger(hour=23, minute=30), id="nightly_refresh", replace_existing=True)
     scheduler.start()
-    print("⏰ Scheduler başlatıldı (her gün 11:30)")
+    print("⏰ Scheduler başlatıldı (her gün 23:30)")
 
 
 # ─── TEFAS ─────────────────────────────────────────────────────────────────────
@@ -585,9 +604,31 @@ async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
             fund_name_row = fn_ex.scalar_one_or_none() or fund_code
             fund_type_row = ft_ex.scalar_one_or_none() or ""
 
-            # Claude web search ile güncel haberler çek (cache'li)
-            raw_news = await _fetch_market_news(fund_type=fund_type_row, fund_code=fund_code)
+            # news.json'dan haber oku (export-news.sh ile güncelleniyor)
             import logging as _lg
+            raw_news = ""
+            try:
+                import json as _json2
+                _npath = "/root/FONAR/fonar-web/public/news.json"
+                with open(_npath) as _nf:
+                    _news_items = _json2.load(_nf)
+                # Fon türüne göre filtrele
+                _ft = fund_type_row.lower()
+                _kws = []
+                if any(k in _ft for k in ["hisse","bist","yoğun"]): _kws = ["borsa","bist","hisse"]
+                elif any(k in _ft for k in ["altın","altin"]): _kws = ["altın","gold","ons"]
+                elif any(k in _ft for k in ["tahvil","bono","borçlanma"]): _kws = ["faiz","tahvil","tcmb"]
+                elif any(k in _ft for k in ["para piyasası","likit"]): _kws = ["faiz","mevduat"]
+                elif any(k in _ft for k in ["döviz","dolar","euro"]): _kws = ["dolar","euro","kur"]
+                # Filtrele veya hepsini al
+                if _kws:
+                    _filtered = [n for n in _news_items if any(k in (n.get("title","")+" "+n.get("description","")).lower() for k in _kws)]
+                else:
+                    _filtered = _news_items
+                _tops = (_filtered or _news_items)[:6]
+                raw_news = "\n".join([f"• {n.get('title','')}" for n in _tops])
+            except Exception as _ne:
+                _lg.warning(f"NEWS_READ_HATA [{fund_code}]: {_ne}")
             _lg.warning(f"NEWS_DEBUG [{fund_code}] fund_type={fund_type_row!r} raw_news_len={len(raw_news)}")
 
             # Qwen ile haber → sinyal
@@ -603,7 +644,7 @@ Haberler:
                     import httpx as _httpx, logging as _lg2
                     async with _httpx.AsyncClient(timeout=60) as _hc:
                         _resp = await _hc.post("http://localhost:11434/api/generate", json={
-                            "model": "qwen2.5:3b", "prompt": qwen_prompt, "stream": False,
+                            "model": "gemma3:4b", "prompt": qwen_prompt, "stream": False,
                             "options": {"temperature": 0.1, "num_predict": 80}
                         })
                         _text = _resp.json().get("response", "")
@@ -616,7 +657,7 @@ Haberler:
                                 "signal": _parsed.get("signal", "nötr"),
                                 "confidence": float(_parsed.get("confidence", 0.5)),
                                 "reason": _parsed.get("reason", ""),
-                                "source": "qwen+claude_search"
+                                "source": "gemma3+news_cache"
                             }
                 except Exception as _qe:
                     import logging as _lg3
@@ -856,7 +897,7 @@ PDF METNİ (ilk 1500 karakter):
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
                 "http://localhost:11434/api/generate",
-                json={"model": "qwen2.5:3b", "prompt": prompt, "stream": False, "options": {"num_predict": 300}}
+                json={"model": "gemma3:4b", "prompt": prompt, "stream": False, "options": {"num_predict": 300}}
             )
             result = resp.json()
             summary = result.get("response", "").strip()
@@ -1043,7 +1084,7 @@ def _calculate_scorecard(prices: list, monthly_return: float, yearly_return: flo
             e = len(prices)-i*21
             s = e-21
             if s >= 0:
-                monthly_rets.append((prices[e-1]-prices[s])/prices[s]*100)
+                if prices[s] > 0: monthly_rets.append((prices[e-1]-prices[s])/prices[s]*100)
         avg6m = sum(monthly_rets)/len(monthly_rets) if monthly_rets else 0
         if monthly_return > avg6m*1.1: mom_score = 75
         elif monthly_return > avg6m*0.8: mom_score = 60
@@ -1122,25 +1163,48 @@ def _calculate_scorecard(prices: list, monthly_return: float, yearly_return: flo
             except: pass
     scores["toparlanma"] = recovery_score
 
-    # ── KOMPOZİT SKOR (ağırlıklı) ──
-    weights = {
-        "yonetim":         0.20,
-        "para_akisi":      0.15,
-        "istikrar":        0.15,
-        "evolver_trend":   0.15,
-        "toparlanma":      0.12,
-        "sinyal_dogrulugu":0.10,
-        "momentum_trend":  0.05,
-        "zamanlama":       0.08,
+    # ── KOMPOZİT SKOR (ağırlıklı, adaptif) ──
+    # Evolver bağımlı boyutlar: veri varsa gerçek skor, yoksa bu boyutu hesaptan çıkar
+    _has_evolver = bool(evolver_data)
+    _has_signal_acc = any(
+        (m.get("type","") if isinstance(m,dict) else m.memory_type) == "signal_accuracy"
+        for m in (evolver_data or [])
+    )
+
+    weights_full = {
+        "yonetim":          0.22,
+        "para_akisi":       0.18,
+        "istikrar":         0.18,
+        "evolver_trend":    0.15,
+        "toparlanma":       0.12,
+        "sinyal_dogrulugu": 0.08,
+        "momentum_trend":   0.07,
+        "zamanlama":        0.08,
     }
-    overall = round(sum(scores[k]*w for k,w in weights.items()), 1)
+    # Evolver verisi yoksa ağırlıklarını sıfırla, kalanı normalize et
+    if not _has_evolver:
+        weights_full["evolver_trend"] = 0.0
+        weights_full["toparlanma"] = 0.0
+    if not _has_signal_acc:
+        weights_full["sinyal_dogrulugu"] = 0.0
+    # RSI verisi yoksa zamanlama boyutunu kaldır
+    if details.get("rsi") is None:
+        weights_full["zamanlama"] = 0.0
+
+    total_w = sum(weights_full.values())
+    if total_w > 0:
+        weights = {k: v / total_w for k, v in weights_full.items()}
+    else:
+        weights = {k: 1/len(weights_full) for k in weights_full}
+
+    overall = round(sum(scores[k]*weights[k] for k in weights), 1)
 
     def grade(s):
-        if s >= 85: return "A+"
-        if s >= 75: return "A"
-        if s >= 65: return "B+"
-        if s >= 55: return "B"
-        if s >= 45: return "C"
+        if s >= 80: return "A+"
+        if s >= 70: return "A"
+        if s >= 60: return "B+"
+        if s >= 50: return "B"
+        if s >= 40: return "C"
         return "D"
 
     # Öne çıkan sinyal
@@ -1276,6 +1340,9 @@ async def _fetch_market_news(fund_type: str, fund_code: str) -> str:
                 "Verilen sorgu için web araması yap ve sonuçlardan "
                 "yalnızca en önemli 3-4 güncel haberi madde madde özetle. "
                 "Her madde tek satır, maksimum 120 karakter. "
+                "Farklı kaynaklardan haber seç: Bloomberg HT, Milliyet Ekonomi, Dünya Gazetesi, Ekonomim, Sabah Ekonomi, Reuters Türkiye, AA Ekonomi, NTV Para gibi. "
+                "Aynı kaynaktan birden fazla haber alma. "
+                "Her haberin yanında parantez içinde kaynak adını yaz. "
                 "Sadece liste döndür, başka hiçbir şey yazma. "
                 "Türkçe yaz."
             ),
@@ -1322,7 +1389,7 @@ async def _analyze_tefas(fund_code: str, fund_info: dict, evolver: dict, history
         yearly_return=total_return,
         risk_score=fund_info.get("riskScore", 4),
         participant_history=participant_history,
-        mevduat_aylik=3.54
+        mevduat_aylik=MEVDUAT_AYLIK
     )
 
     # 6 aylık ortalama aylık getiri
@@ -1403,7 +1470,7 @@ Sinyaller: {", ".join([s["msg"] for s in ev_signals[:3]])}"""
             else:
                 _afo_ret = None
         # Mevduat faizi (TCMB politika faizi ~%42.5 yıllık → aylık ~%3.1)
-        _mevduat_aylik = round(42.5 / 12, 2)
+        _mevduat_aylik = MEVDUAT_AYLIK
         # 30 günlük dönem için benchmark
         benchmark_str = f"""
 BENCHMARK (Son 30 Gün):
@@ -1457,6 +1524,8 @@ FON VERİLERİ:
 - Stopaj: %{fund_info.get("stopajRate", 17.5)} | Valör: {fund_info.get("valor", "T+1/T+2")}
 {scorecard_str}{holdings_str}{alloc_str}{benchmark_str}{anomaly_str}{ev_str}{news_str}{pdf_str}
 
+SCORECARD SINIFI: Bu fonun kompozit notu {scorecard["grade"]} ({scorecard["overall"]}/100). Analizlerini bu nota tutarlı olarak bağla — C notu alan bir fon için "güçlü performans" gibi ifadeler kullanma.
+
 KURALLAR:
 - Türkçe yaz.
 - Sadece yukarıdaki verileri kullan.
@@ -1490,7 +1559,7 @@ KURALLAR:
     try:
         resp = await loop.run_in_executor(None, lambda: client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=1000,
+            max_tokens=1200,
             system="Sen bir Türk yatırım fonu analistisin. Sadece JSON döndür, başka hiçbir şey yazma.",
             messages=[{"role": "user", "content": prompt}]
         ))
@@ -2153,7 +2222,7 @@ async def get_public_funds():
                     yearly_return=fund.get("yearlyReturn") or 0,
                     risk_score=fund.get("riskScore") or 4,
                     participant_history=[r[1] for r in prices_data[-30:] if r[1]],
-                    mevduat_aylik=3.54
+                    mevduat_aylik=MEVDUAT_AYLIK
                 )
             else:
                 fund["scorecard"] = {}
@@ -2252,7 +2321,7 @@ async def get_fund_detail(fund_code: str):
             yearly_return=yearly_return or 0,
             risk_score=r.risk_score or 4,
             participant_history=[rec.participant_count for rec in prices[-30:] if rec.participant_count],
-            mevduat_aylik=3.54,
+            mevduat_aylik=MEVDUAT_AYLIK,
             evolver_data=evolver_list
         ) if len(prices_vals) >= 20 else {},
     }
@@ -2463,7 +2532,7 @@ async def get_top5():
             yearly_return=ret(252) or 0,
             risk_score=recs[-1].risk_score or 4,
             participant_history=[p for p in participants[-30:] if p],
-            mevduat_aylik=3.54,
+            mevduat_aylik=MEVDUAT_AYLIK,
             evolver_data=[{"type": m.memory_type, "content": m.content} for m in ev_mems]
         ) if len(prices) >= 20 else {}
 

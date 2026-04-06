@@ -289,6 +289,42 @@ function EvolverPanel({ fundCode }) {
         )
       })}
 
+      {byType('news_signal').map((s, i) => {
+        let d = {}; try { d = JSON.parse(s.content) } catch {}
+        const sig = d.signal || 'nötr'
+        const sigColor = sig === 'pozitif' ? '#00C2A8' : sig === 'negatif' ? '#EF476F' : sig === 'uyarı' ? '#FFD166' : '#94a3b8'
+        const sigIcon = sig === 'pozitif' ? '📈' : sig === 'negatif' ? '📉' : sig === 'uyarı' ? '⚠️' : '➖'
+        return (
+          <div key={i} style={{ background: '#1e293b', borderRadius: 12, padding: 16 }}>
+            <p style={{ color: '#3A86FF', fontSize: 12, fontWeight: 600, margin: '0 0 12px' }}>
+              📰 Piyasa Haber Sinyali
+            </p>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+              <div style={{ background: `${sigColor}22`, border: `1px solid ${sigColor}55`, borderRadius: 8, padding: '8px 16px', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 18 }}>{sigIcon}</span>
+                <span style={{ color: sigColor, fontWeight: 700, fontSize: 15, textTransform: 'capitalize' }}>{sig}</span>
+              </div>
+              <div style={{ color: '#64748b', fontSize: 12 }}>
+                Güven: %{Math.round((d.confidence || 0.5) * 100)}
+              </div>
+            </div>
+            {d.reason && (
+              <div style={{ color: '#cbd5e1', fontSize: 13, marginBottom: 8, lineHeight: 1.5 }}>
+                {d.reason}
+              </div>
+            )}
+            {d.news_snippet && (
+              <div style={{ background: '#0f172a', borderRadius: 8, padding: '10px 12px', fontSize: 11, color: '#475569', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
+                {d.news_snippet.slice(0, 300)}
+              </div>
+            )}
+            <div style={{ color: '#334155', fontSize: 10, marginTop: 8 }}>
+              Kaynak: {d.source || '—'} · {d.date || ''}
+            </div>
+          </div>
+        )
+      })}
+
       {memories.length === 0 && (
         <div style={{ color: '#475569', fontSize: 13, textAlign: 'center', padding: 32 }}>
           🤖 Evolver henüz öğrenmedi. TEFAS verisi çekildikçe otomatik öğrenir.
