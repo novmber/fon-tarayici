@@ -74,3 +74,9 @@ export async function getStats() {
   if (!res.ok) return {}
   return res.json()
 }
+
+// ─── TimesFM Tahmin ────────────────────────────────────────────────
+export async function getForecast() {
+  const res = await fetch(`${BASE}/forecast-batch`)
+  return res.json()
+}
