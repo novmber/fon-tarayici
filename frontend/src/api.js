@@ -80,3 +80,13 @@ export async function getForecast() {
   const res = await fetch(`${BASE}/forecast-batch`)
   return res.json()
 }
+
+export async function getFundForecast(code, horizon = 5) {
+  const res = await fetch(`${BASE}/forecast/${code}?horizon=${horizon}`)
+  return res.json()
+}
+
+export async function getCorrelation(code, topN = 5) {
+  const res = await fetch(`${BASE}/correlation/${code}?top_n=${topN}`)
+  return res.json()
+}

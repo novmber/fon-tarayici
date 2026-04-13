@@ -1,9 +1,9 @@
-import { useState, useEffect } from 'react'
+import React, { useState, useEffect } from 'react'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend
 } from 'recharts'
-import { getEvolver, deleteFund } from '../api.js'
+import { getEvolver, deleteFund, getFundForecast, getCorrelation } from '../api.js'
 import ManualPrice from './ManualPrice.jsx'
 import InfoCard from './InfoCard.jsx'
 import { getFund } from '../api.js'
@@ -142,6 +142,105 @@ function TwitterPanel({ text, fund, latest, onAnalyze }) {
           🖼️ İnfografik İndir
         </button>
       </div>
+    </div>
+  )
+}
+
+function CorrelationTab({ fundCode, onSelectFund }) {
+  const [data, setData] = React.useState(null)
+  const [loading, setLoading] = React.useState(true)
+  React.useEffect(() => {
+    getCorrelation(fundCode).then(d => { setData(d); setLoading(false) }).catch(() => setLoading(false))
+  }, [fundCode])
+  if (loading) return <div style={{ textAlign: "center", color: "#475569", padding: 40 }}>⏳ Korelasyon hesaplanıyor...</div>
+  if (!data) return <div style={{ textAlign: "center", color: "#EF476F", padding: 40 }}>❌ Veri alınamadı</div>
+  const Section = ({ title, color, items }) => (
+    <div style={{ background: "#1e293b", borderRadius: 12, padding: 16, marginBottom: 14 }}>
+      <p style={{ color, fontSize: 12, fontWeight: 600, margin: "0 0 12px" }}>{title}</p>
+      {items.map((f, i) => (
+        <div key={f.code} onClick={() => onSelectFund?.(f.code)}
+          style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", borderRadius: 8, cursor: "pointer", marginBottom: 6, background: "#0f172a" }}
+          onMouseEnter={e => e.currentTarget.style.background = "#1e293b"}
+          onMouseLeave={e => e.currentTarget.style.background = "#0f172a"}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 22, height: 22, borderRadius: 6, background: `${color}22`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color, fontWeight: 700 }}>{i+1}</div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 13 }}>{f.code}</div>
+              <div style={{ color: "#64748b", fontSize: 11, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</div>
+            </div>
+          </div>
+          <div style={{ textAlign: "right", flexShrink: 0 }}>
+            <div style={{ fontSize: 12, color: f.correlation >= 0 ? "#00C2A8" : "#EF476F", fontWeight: 700 }}>r={f.correlation}</div>
+            <div style={{ fontSize: 11, color: "#64748b" }}>örtüşme %{f.portfolioOverlap != null ? Math.round(f.portfolioOverlap*100) : "?"}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+  return (
+    <div>
+      <Section title="🔗 En Benzer Fonlar — aynı varlık sınıfı, çeşitlendirme sağlamaz" color="#FFD166" items={data.similar || []} />
+      <Section title="⚖️ En İyi Çeşitlendirici Fonlar — portföyü dengeler" color="#00C2A8" items={data.diversifiers || []} />
+    </div>
+  )
+}
+
+function ForecastTab({ fundCode, forecast, setForecast, loading, setLoading }) {
+  useEffect(() => {
+    if (forecast) return
+    setLoading(true)
+    getFundForecast(fundCode).then(d => { setForecast(d); setLoading(false) }).catch(() => setLoading(false))
+  }, [fundCode])
+
+  if (loading) return <div style={{ textAlign: "center", color: "#475569", padding: 40 }}>⏳ TimesFM tahmin hesaplanıyor...</div>
+  if (!forecast) return <div style={{ textAlign: "center", color: "#EF476F", padding: 40 }}>❌ Tahmin alınamadı</div>
+
+  const ev = forecast.evolverContext || {}
+  const trendColor = forecast.trend === "up" ? "#00C2A8" : "#EF476F"
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ background: "#1e293b", borderRadius: 12, padding: 16 }}>
+        <p style={{ color: "#8338EC", fontSize: 12, fontWeight: 600, margin: "0 0 12px" }}>🤖 TimesFM · 5 Günlük Tahmin</p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8, marginBottom: 12 }}>
+          {[["Trend", forecast.trend === "up" ? "📈 Yükseliş" : "📉 Düşüş", trendColor],["5G Değişim", (forecast.totalChange >= 0 ? "+" : "") + forecast.totalChange + "%", trendColor],["Bağlam", forecast.contextDays + " gün", "#94a3b8"]].map(([l,v,c]) => (
+            <div key={l} style={{ background: "#0f172a", borderRadius: 8, padding: "10px 12px" }}>
+              <div style={{ color: "#64748b", fontSize: 10 }}>{l}</div>
+              <div style={{ color: c, fontWeight: 700, fontSize: 14, marginTop: 2 }}>{v}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 6 }}>
+          {(forecast.forecasts || []).map((f, i) => (
+            <div key={i} style={{ background: "#0f172a", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
+              <div style={{ color: "#475569", fontSize: 10 }}>{f.date?.slice(5)}</div>
+              <div style={{ color: f.change >= 0 ? "#00C2A8" : "#EF476F", fontWeight: 700, fontSize: 13, marginTop: 4 }}>{f.change >= 0 ? "+" : ""}{f.change}%</div>
+              <div style={{ color: "#64748b", fontSize: 11, marginTop: 2 }}>{f.price?.toFixed(3)}₺</div>
+            </div>
+          ))}
+        </div>
+      </div>
+      {Object.keys(ev).length > 0 && (
+        <div style={{ background: "#1e293b", borderRadius: 12, padding: 16 }}>
+          <p style={{ color: "#00C2A8", fontSize: 12, fontWeight: 600, margin: "0 0 12px" }}>🔮 Evolver Bağlamı</p>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8, marginBottom: 8 }}>
+            {[["Momentum 30g", (ev.momentum_30d >= 0 ? "+" : "") + ev.momentum_30d + "%", ev.momentum_30d >= 0 ? "#00C2A8" : "#EF476F"],["Sharpe", ev.kazanc_risk_skoru?.toFixed(2), ev.kazanc_risk_skoru >= 1 ? "#00C2A8" : ev.kazanc_risk_skoru >= 0 ? "#FFD166" : "#EF476F"],["Yıllık Vol", ev.annual_volatility + "%", "#FFD166"]].map(([l,v,c]) => (
+              <div key={l} style={{ background: "#0f172a", borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ color: "#64748b", fontSize: 10 }}>{l}</div>
+                <div style={{ color: c, fontWeight: 700, fontSize: 14, marginTop: 2 }}>{v}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
+            {[["Max Drawdown", "-" + ev.max_drawdown + "%", "#EF476F"],["Pozitif Gün", "%" + ev.positive_days_pct, ev.positive_days_pct >= 50 ? "#00C2A8" : "#EF476F"],["Ort. Günlük", (ev.avg_daily_return >= 0 ? "+" : "") + ev.avg_daily_return + "%", ev.avg_daily_return >= 0 ? "#00C2A8" : "#EF476F"]].map(([l,v,c]) => (
+              <div key={l} style={{ background: "#0f172a", borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ color: "#64748b", fontSize: 10 }}>{l}</div>
+                <div style={{ color: c, fontWeight: 700, fontSize: 14, marginTop: 2 }}>{v}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -379,6 +478,8 @@ function RiskScoreInput({ fundCode, onSaved }) {
 
 export default function FundDetail({ fundCode, onClose, onDeleteFund, onRefresh }) {
   const [fund, setFund] = useState(null)
+  const [forecast, setForecast] = useState(null)
+  const [forecastLoading, setForecastLoading] = useState(false)
   const [tab, setTab] = useState('trend')
   const [loading, setLoading] = useState(true)
 
@@ -408,6 +509,8 @@ export default function FundDetail({ fundCode, onClose, onDeleteFund, onRefresh 
     { id: 'infografik', label: '🖼️ İnfografik' },
     { id: 'canli', label: '📡 Canlı Fiyat' },
     { id: 'dexter', label: '🤖 Dexter' },
+    { id: 'forecast', label: '🤖 Tahmin' },
+    { id: 'correlation', label: '🔗 Benzer Fonlar' },
     { id: 'evolver', label: '🔮 Evolver' },
     { id: 'twitter', label: '𝕏 Tweet' },
   ]
@@ -570,6 +673,8 @@ export default function FundDetail({ fundCode, onClose, onDeleteFund, onRefresh 
             </div>
           )}
 
+          {tab === 'forecast' && <ForecastTab fundCode={fund.code} forecast={forecast} setForecast={setForecast} loading={forecastLoading} setLoading={setForecastLoading} />}
+          {tab === 'correlation' && <CorrelationTab fundCode={fund.code} onSelectFund={onSelectFund} />}
           {tab === 'evolver' && <EvolverPanel fundCode={fund.code} />}
 
           {tab === 'twitter' && (

@@ -299,6 +299,84 @@ async def _tefas_top_holdings(fund_code: str) -> list:
 
 # ─── EVOLVER ───────────────────────────────────────────────────────────────────
 
+async def _verify_timesfm(session: AsyncSession, fund_code: str, current_price: float, current_date: str):
+    """TimesFM tahminlerini gerçek fiyatla karşılaştır"""
+    from datetime import date as _date
+    preds = (await session.execute(
+        select(EvolverMemory).where(
+            EvolverMemory.fund_code == fund_code,
+            EvolverMemory.memory_type == "timesfm_prediction"
+        ).order_by(EvolverMemory.snapshot_date)
+    )).scalars().all()
+
+    for pred_rec in preds:
+        try:
+            pred = json.loads(pred_rec.content)
+        except:
+            continue
+        if pred.get("verified"):
+            continue
+        pred_date = pred.get("date", "")
+        last_price = pred.get("last_price", 0)
+        if not last_price or not pred_date:
+            continue
+        try:
+            d0 = _date.fromisoformat(pred_date)
+            d1 = _date.fromisoformat(current_date)
+            days_passed = (d1 - d0).days
+        except:
+            continue
+        if days_passed < 5:
+            continue
+        # 5 iş günü geçti — doğrula
+        actual_change = round((current_price - last_price) / last_price * 100, 2) if last_price > 0 else 0
+        predicted_trend = pred.get("trend", "neutral")
+        actual_trend = "up" if actual_change > 1 else "down" if actual_change < -1 else "neutral"
+        correct = predicted_trend == actual_trend
+        pred["verified"] = True
+        pred["actual_change"] = actual_change
+        pred["actual_trend"] = actual_trend
+        pred["correct"] = correct
+        pred["days_to_verify"] = days_passed
+        pred_rec.content = json.dumps(pred, ensure_ascii=False)
+        pred_rec.confidence = 0.8 if correct else 0.2
+        pred_rec.last_seen = datetime.utcnow()
+
+    # Doğruluk istatistiği güncelle
+    all_preds = (await session.execute(
+        select(EvolverMemory).where(
+            EvolverMemory.fund_code == fund_code,
+            EvolverMemory.memory_type == "timesfm_prediction"
+        )
+    )).scalars().all()
+    verified = [json.loads(p.content) for p in all_preds if json.loads(p.content).get("verified")]
+    if len(verified) >= 3:
+        acc = round(sum(1 for v in verified if v.get("correct")) / len(verified) * 100, 1)
+        acc_ex = await session.execute(select(EvolverMemory).where(
+            EvolverMemory.fund_code == fund_code,
+            EvolverMemory.memory_type == "timesfm_accuracy"
+        ))
+        acc_rec = acc_ex.scalar_one_or_none()
+        acc_content = json.dumps({
+            "accuracy_pct": acc,
+            "total": len(verified),
+            "correct": sum(1 for v in verified if v.get("correct")),
+            "last_updated": current_date
+        }, ensure_ascii=False)
+        if acc_rec:
+            acc_rec.content = acc_content
+            acc_rec.last_seen = datetime.utcnow()
+        else:
+            session.add(EvolverMemory(
+                fund_code=fund_code,
+                memory_type="timesfm_accuracy",
+                content=acc_content,
+                confidence=0.7,
+                snapshot_date=datetime.utcnow().date(),
+            ))
+    await session.commit()
+
+
 async def _verify_predictions(session: AsyncSession, fund_code: str, current_price: float, current_date: str):
     """Geçmiş Dexter tahminlerini doğrula ve doğruluk skorunu güncelle"""
     preds = (await session.execute(
@@ -2546,6 +2624,136 @@ async def get_benchmarks():
 
 
 
+
+@app.get("/api/correlation/{fund_code}")
+async def get_correlation(fund_code: str, top_n: int = 5):
+    """Belirli bir fon için benzer ve çeşitlendirici fonları bul"""
+    fund_code = fund_code.upper()
+    import math
+
+    async with AsyncSessionLocal() as session:
+        all_recs = (await session.execute(
+            select(FundRecord.fund_code, FundRecord.date_key, FundRecord.unit_price)
+            .where(FundRecord.unit_price > 0)
+            .order_by(FundRecord.fund_code, FundRecord.date_key)
+        )).fetchall()
+
+    # Fon bazlı fiyat dict
+    from collections import defaultdict
+    prices = defaultdict(dict)
+    for code, date, price in all_recs:
+        prices[code][date] = float(price)
+
+    # Yeterli veri kontrolü
+    if fund_code not in prices or len(prices[fund_code]) < 30:
+        raise HTTPException(404, f"{fund_code} için yeterli veri yok")
+
+    # Günlük getiri hesapla
+    def daily_returns(p_dict):
+        dates = sorted(p_dict.keys())
+        rets = []
+        for i in range(1, len(dates)):
+            p0, p1 = p_dict[dates[i-1]], p_dict[dates[i]]
+            if p0 > 0:
+                rets.append((p1 - p0) / p0)
+        return rets
+
+    def pearson(a, b):
+        n = min(len(a), len(b))
+        if n < 30: return None
+        a, b = a[-n:], b[-n:]
+        ma, mb = sum(a)/n, sum(b)/n
+        num = sum((a[i]-ma)*(b[i]-mb) for i in range(n))
+        da = math.sqrt(sum((x-ma)**2 for x in a))
+        db = math.sqrt(sum((x-mb)**2 for x in b))
+        if da * db == 0: return None
+        return round(num / (da * db), 4)
+
+    def portfolio_overlap(items_a, items_b):
+        """İki fonun portföy kategorileri arasındaki örtüşme (0-1)"""
+        if not items_a or not items_b: return None
+        try:
+            a = {i['category']: i['value'] for i in items_a if 'category' in i}
+            b = {i['category']: i['value'] for i in items_b if 'category' in i}
+            cats = set(a) | set(b)
+            overlap = sum(min(a.get(c,0), b.get(c,0)) for c in cats) / 100
+            return round(overlap, 4)
+        except: return None
+
+    target_returns = daily_returns(prices[fund_code])
+
+    # Hedef fonun portföy ve risk verisi
+    async with AsyncSessionLocal() as session:
+        target_rec = (await session.execute(
+            select(FundRecord).where(
+                FundRecord.fund_code == fund_code,
+                FundRecord.unit_price > 0
+            ).order_by(FundRecord.date_key.desc())
+        )).scalars().first()
+
+    target_portfolio = []
+    target_risk = None
+    if target_rec:
+        try: target_portfolio = json.loads(target_rec.portfolio_items or '[]')
+        except: pass
+        target_risk = target_rec.risk_score
+
+    # Tüm fonlarla korelasyon hesapla
+    results = []
+    valid_funds = [c for c in prices if c != fund_code and len(prices[c]) >= 30]
+
+    async with AsyncSessionLocal() as session:
+        other_recs = {}
+        for code in valid_funds:
+            rec = (await session.execute(
+                select(FundRecord).where(
+                    FundRecord.fund_code == code,
+                    FundRecord.unit_price > 0
+                ).order_by(FundRecord.date_key.desc())
+            )).scalars().first()
+            if rec:
+                other_recs[code] = rec
+
+    for code in valid_funds:
+        corr = pearson(target_returns, daily_returns(prices[code]))
+        if corr is None: continue
+
+        rec = other_recs.get(code)
+        port = []
+        risk = None
+        name = code
+        if rec:
+            try: port = json.loads(rec.portfolio_items or '[]')
+            except: pass
+            risk = rec.risk_score
+            name = rec.fund_name or code
+
+        overlap = portfolio_overlap(target_portfolio, port)
+
+        # Bileşik benzerlik skoru
+        risk_sim = 1 - abs((target_risk or 4) - (risk or 4)) / 7
+        score = round(
+            0.6 * corr +
+            0.3 * (overlap if overlap is not None else 0.5) +
+            0.1 * risk_sim, 4
+        )
+
+        results.append({
+            "code": code,
+            "name": name,
+            "correlation": corr,
+            "portfolioOverlap": overlap,
+            "riskScore": risk,
+            "similarityScore": score,
+        })
+
+    results.sort(key=lambda x: x["similarityScore"], reverse=True)
+
+    return {
+        "fundCode": fund_code,
+        "similar": results[:top_n],
+        "diversifiers": sorted(results, key=lambda x: x["similarityScore"])[:top_n],
+    }
 @app.get("/api/debug-tefas")
 async def debug_tefas():
     import subprocess
@@ -3098,156 +3306,87 @@ fonar.com.tr
     }
 
 
-# ─── TIMESFM FORECAST ──────────────────────────────────────────────────────────
-_timesfm_model = None
-_timesfm_lock = None
 
-async def _get_timesfm():
-    """TimesFM modelini lazy load et"""
-    global _timesfm_model, _timesfm_lock
-    import asyncio
-    if _timesfm_lock is None:
-        _timesfm_lock = asyncio.Lock()
-    async with _timesfm_lock:
-        if _timesfm_model is None:
-            print("⏳ TimesFM model yükleniyor...")
-            import timesfm
-            loop = asyncio.get_running_loop()
-            def _load():
-                m = timesfm.TimesFM_2p5_200M_torch.from_pretrained("google/timesfm-2.5-200m-pytorch")
-                m.compile(timesfm.ForecastConfig(max_context=512, max_horizon=10, normalize_inputs=True))
-                return m
-            _timesfm_model = await loop.run_in_executor(None, _load)
-            print("✅ TimesFM model hazır")
-    return _timesfm_model
+"""
+Fon Tarayıcı - Backend API v2
+Yeni mimari: TEFAS önce, PDF opsiyonel
+Port: 9009
+"""
 
-@app.get("/api/forecast/{fund_code}")
-async def get_forecast(fund_code: str, horizon: int = 5):
-    """Tek fon için TimesFM tahmini"""
-    fund_code = fund_code.upper()
-    async with AsyncSessionLocal() as session:
-        recs = (await session.execute(
-            select(FundRecord).where(
-                FundRecord.fund_code == fund_code,
-                FundRecord.unit_price > 0
-            ).order_by(FundRecord.date_key)
-        )).scalars().all()
-    
-    if len(recs) < 30:
-        raise HTTPException(400, "Yeterli veri yok (min 30 gün)")
-    
-    prices = [r.unit_price for r in recs]
-    dates = [r.date_key for r in recs]
-    context = prices[-90:] if len(prices) >= 90 else prices
-    last_price = prices[-1]
-    last_date = dates[-1]
-    
-    import numpy as np
-    try:
-        model = await _get_timesfm()
-        loop = asyncio.get_running_loop()
-        def _predict():
-            pf, qf = model.forecast(horizon=horizon, inputs=[np.array(context)])
-            return pf[0].tolist(), qf[0].tolist()
-        point_f, quant_f = await loop.run_in_executor(None, _predict)
-    except Exception as e:
-        raise HTTPException(500, f"Tahmin hatası: {e}")
-    
-    # Sonuçları formatla
-    from datetime import datetime, timedelta
-    last_dt = datetime.strptime(last_date, "%Y-%m-%d")
-    forecasts = []
-    for i, f in enumerate(point_f):
-        next_dt = last_dt + timedelta(days=i+1)
-        # Hafta sonu atla
-        while next_dt.weekday() >= 5:
-            next_dt += timedelta(days=1)
-        change = (f - last_price) / last_price * 100
-        forecasts.append({
-            "day": i+1,
-            "date": next_dt.strftime("%Y-%m-%d"),
-            "price": round(f, 4),
-            "change": round(change, 2),
-            "direction": "up" if change > 0 else "down"
-        })
-    
-    trend = "up" if point_f[-1] > last_price else "down"
-    total_change = round((point_f[-1] - last_price) / last_price * 100, 2)
-    
-    return {
-        "fundCode": fund_code,
-        "lastPrice": last_price,
-        "lastDate": last_date,
-        "horizon": horizon,
-        "trend": trend,
-        "totalChange": total_change,
-        "trendEmoji": "🚀" if total_change > 2 else ("📈" if total_change > 0 else ("📉" if total_change > -2 else "⚠️")),
-        "forecasts": forecasts,
-        "contextDays": len(context),
-        "model": "TimesFM-2.5-200M"
-    }
+import os, json, asyncio, subprocess, urllib.request, urllib.parse
+import httpx
+import requests as _requests
+from datetime import datetime, date
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger, timedelta
+from pathlib import Path
+from typing import Optional
 
-@app.get("/api/forecast-batch")
-async def get_forecast_batch():
-    """Tüm fonlar için batch TimesFM tahmini"""
-    async with AsyncSessionLocal() as session:
-        codes = [r[0] for r in (await session.execute(
-            select(FundRecord.fund_code).distinct()
-        )).fetchall()]
-    
-    import numpy as np
-    all_contexts = []
-    valid_codes = []
-    
-    for code in codes:
-        async with AsyncSessionLocal() as session:
-            recs = (await session.execute(
-                select(FundRecord.unit_price).where(
-                    FundRecord.fund_code == code,
-                    FundRecord.unit_price > 0
-                ).order_by(FundRecord.date_key)
-            )).scalars().all()
-        prices = list(recs)
-        if len(prices) >= 30:
-            context = prices[-90:] if len(prices) >= 90 else prices
-            all_contexts.append(np.array(context))
-            valid_codes.append(code)
-    
-    try:
-        model = await _get_timesfm()
-        loop = asyncio.get_running_loop()
-        def _batch_predict():
-            pf, qf = model.forecast(horizon=5, inputs=all_contexts)
-            return pf.tolist()
-        point_forecasts = await loop.run_in_executor(None, _batch_predict)
-    except Exception as e:
-        raise HTTPException(500, f"Batch tahmin hatası: {e}")
-    
-    results = {}
-    for code, pf, ctx in zip(valid_codes, point_forecasts, all_contexts):
-        last_price = float(ctx[-1])
-        total_change = round((pf[-1] - last_price) / last_price * 100, 2)
-        results[code] = {
-            "trend": "up" if pf[-1] > last_price else "down",
-            "totalChange": total_change,
-            "day5Price": round(pf[-1], 4),
-            "trendEmoji": "🚀" if total_change > 2 else ("📈" if total_change > 0 else ("📉" if total_change > -2 else "⚠️"))
-        }
-    
-    # Trend bazlı sırala
-    up_funds = sorted([(k,v) for k,v in results.items() if v["trend"]=="up"], 
-                      key=lambda x: x[1]["totalChange"], reverse=True)
-    down_funds = sorted([(k,v) for k,v in results.items() if v["trend"]=="down"], 
-                        key=lambda x: x[1]["totalChange"])
-    
-    return {
-        "total": len(results),
-        "upCount": len(up_funds),
-        "downCount": len(down_funds),
-        "topUp": [{"code":k, **v} for k,v in up_funds[:5]],
-        "topDown": [{"code":k, **v} for k,v in down_funds[:5]],
-        "all": sorted([{"code": k, **v} for k, v in results.items()], key=lambda x: x["totalChange"], reverse=True)
-    }
+import anthropic
+from fastapi import FastAPI, UploadFile, File, HTTPException, Body
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import DeclarativeBase, sessionmaker, mapped_column, Mapped
+from sqlalchemy import String, Float, Integer, Text, Date, DateTime, select, delete, desc
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ── TCMB politika faizi — .env'den al, yoksa güncel varsayılan ──
+TCMB_POLICY_RATE = float(os.getenv("TCMB_POLICY_RATE", "42.5"))
+MEVDUAT_AYLIK = round(TCMB_POLICY_RATE / 12, 2)
+
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class FundRecord(Base):
+    __tablename__ = "fund_records"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_code: Mapped[str] = mapped_column(String(20), index=True)
+    fund_name: Mapped[str] = mapped_column(String(300))
+    date_key: Mapped[str] = mapped_column(String(10), index=True)
+    month_key: Mapped[str] = mapped_column(String(7), index=True)
+    unit_price: Mapped[float] = mapped_column(Float)
+    total_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    participant_count: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    share_count: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    portfolio_items: Mapped[str] = mapped_column(Text, default="[]")
+    has_pdf_analysis: Mapped[int] = mapped_column(Integer, default=0)
+    monthly_return: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    yearly_return: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    avg_maturity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    monthly_turnover: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    top_holdings: Mapped[str] = mapped_column(Text, default="[]")
+    expenses: Mapped[str] = mapped_column(Text, default="{}")
+    risk_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    stopaj_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    valor: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    fund_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    ai_insights: Mapped[str] = mapped_column(Text, default="[]")
+    dexter_recommendations: Mapped[str] = mapped_column(Text, default="[]")
+    twitter_summary: Mapped[str] = mapped_column(Text, default="")
+    raw_pdf_text: Mapped[str] = mapped_column(Text, default="")
+    pdf_summary: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    published: Mapped[Optional[int]] = mapped_column(Integer, default=0, nullable=True)
+
+
+class EvolverMemory(Base):
+    __tablename__ = "evolver_memory"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_code: Mapped[str] = mapped_column(String(20), index=True)
+    memory_type: Mapped[str] = mapped_column(String(50))
+    content: Mapped[str] = mapped_column(Text)
+    confidence: Mapped[float] = mapped_column(Float, default=0.5)
+    occurrence_count: Mapped[int] = mapped_column(Integer, default=1)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    snapshot_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
 
 
 # ─── TIMESFM FORECAST ──────────────────────────────────────────────────────────
@@ -3273,6 +3412,9 @@ async def _get_timesfm():
             print("✅ TimesFM model hazır")
     return _timesfm_model
 
+
+
+
 @app.get("/api/forecast/{fund_code}")
 async def get_forecast(fund_code: str, horizon: int = 5):
     """Tek fon için TimesFM tahmini"""
@@ -3284,17 +3426,29 @@ async def get_forecast(fund_code: str, horizon: int = 5):
                 FundRecord.unit_price > 0
             ).order_by(FundRecord.date_key)
         )).scalars().all()
-    
     if len(recs) < 30:
         raise HTTPException(400, "Yeterli veri yok (min 30 gün)")
-    
     prices = [r.unit_price for r in recs]
     dates = [r.date_key for r in recs]
     context = prices[-90:] if len(prices) >= 90 else prices
     last_price = prices[-1]
     last_date = dates[-1]
-    
     import numpy as np
+
+    # Evolver'dan price_pattern çek
+    evolver_ctx = {}
+    try:
+        async with AsyncSessionLocal() as _es:
+            _ep = (await _es.execute(
+                select(EvolverMemory).where(
+                    EvolverMemory.fund_code == fund_code,
+                    EvolverMemory.memory_type == "price_pattern"
+                ).order_by(EvolverMemory.snapshot_date.desc())
+            )).scalars().first()
+            if _ep:
+                evolver_ctx = json.loads(_ep.content)
+    except Exception as _e:
+        print(f"Evolver ctx hatasi: {_e}")
     try:
         model = await _get_timesfm()
         loop = asyncio.get_running_loop()
@@ -3304,28 +3458,40 @@ async def get_forecast(fund_code: str, horizon: int = 5):
         point_f, quant_f = await loop.run_in_executor(None, _predict)
     except Exception as e:
         raise HTTPException(500, f"Tahmin hatası: {e}")
-    
-    # Sonuçları formatla
     from datetime import datetime, timedelta
     last_dt = datetime.strptime(last_date, "%Y-%m-%d")
     forecasts = []
+    curr_dt = last_dt
     for i, f in enumerate(point_f):
-        next_dt = last_dt + timedelta(days=i+1)
-        # Hafta sonu atla
-        while next_dt.weekday() >= 5:
-            next_dt += timedelta(days=1)
+        curr_dt += timedelta(days=1)
+        while curr_dt.weekday() >= 5:
+            curr_dt += timedelta(days=1)
         change = (f - last_price) / last_price * 100
         forecasts.append({
             "day": i+1,
-            "date": next_dt.strftime("%Y-%m-%d"),
+            "date": curr_dt.strftime("%Y-%m-%d"),
             "price": round(f, 4),
             "change": round(change, 2),
             "direction": "up" if change > 0 else "down"
         })
-    
     trend = "up" if point_f[-1] > last_price else "down"
     total_change = round((point_f[-1] - last_price) / last_price * 100, 2)
-    
+
+    # Tahmini Evolver'a kaydet
+    from datetime import datetime as _dt
+    import json as _json
+    _pred = _json.dumps({"date": _dt.utcnow().strftime("%Y-%m-%d"), "last_price": last_price, "last_date": last_date, "trend": trend, "total_change": total_change, "forecasts": forecasts, "verified": False, "actual_change": None, "correct": None}, ensure_ascii=False)
+    try:
+        async with AsyncSessionLocal() as _s:
+            _ex = await _s.execute(select(EvolverMemory).where(EvolverMemory.fund_code == fund_code, EvolverMemory.memory_type == "timesfm_prediction", EvolverMemory.snapshot_date == _dt.utcnow().date()))
+            _rec = _ex.scalar_one_or_none()
+            if _rec:
+                _rec.content = _pred; _rec.last_seen = _dt.utcnow()
+            else:
+                _s.add(EvolverMemory(fund_code=fund_code, memory_type="timesfm_prediction", content=_pred, confidence=0.5, snapshot_date=_dt.utcnow().date()))
+            await _s.commit()
+    except Exception as _e:
+        print(f"timesfm kayit hatasi: {_e}")
     return {
         "fundCode": fund_code,
         "lastPrice": last_price,
@@ -3336,8 +3502,10 @@ async def get_forecast(fund_code: str, horizon: int = 5):
         "trendEmoji": "🚀" if total_change > 2 else ("📈" if total_change > 0 else ("📉" if total_change > -2 else "⚠️")),
         "forecasts": forecasts,
         "contextDays": len(context),
-        "model": "TimesFM-2.5-200M"
+        "model": "TimesFM-2.5-200M",
+        "evolverContext": evolver_ctx,
     }
+
 
 @app.get("/api/forecast-batch")
 async def get_forecast_batch():
@@ -3346,11 +3514,10 @@ async def get_forecast_batch():
         codes = [r[0] for r in (await session.execute(
             select(FundRecord.fund_code).distinct()
         )).fetchall()]
-    
     import numpy as np
     all_contexts = []
     valid_codes = []
-    
+    last_prices = []
     for code in codes:
         async with AsyncSessionLocal() as session:
             recs = (await session.execute(
@@ -3364,7 +3531,7 @@ async def get_forecast_batch():
             context = prices[-90:] if len(prices) >= 90 else prices
             all_contexts.append(np.array(context))
             valid_codes.append(code)
-    
+            last_prices.append(float(prices[-1]))
     try:
         model = await _get_timesfm()
         loop = asyncio.get_running_loop()
@@ -3374,10 +3541,8 @@ async def get_forecast_batch():
         point_forecasts = await loop.run_in_executor(None, _batch_predict)
     except Exception as e:
         raise HTTPException(500, f"Batch tahmin hatası: {e}")
-    
     results = {}
-    for code, pf, ctx in zip(valid_codes, point_forecasts, all_contexts):
-        last_price = float(ctx[-1])
+    for code, pf, last_price in zip(valid_codes, point_forecasts, last_prices):
         total_change = round((pf[-1] - last_price) / last_price * 100, 2)
         results[code] = {
             "trend": "up" if pf[-1] > last_price else "down",
@@ -3385,13 +3550,10 @@ async def get_forecast_batch():
             "day5Price": round(pf[-1], 4),
             "trendEmoji": "🚀" if total_change > 2 else ("📈" if total_change > 0 else ("📉" if total_change > -2 else "⚠️"))
         }
-    
-    # Trend bazlı sırala
-    up_funds = sorted([(k,v) for k,v in results.items() if v["trend"]=="up"], 
+    up_funds = sorted([(k,v) for k,v in results.items() if v["trend"]=="up"],
                       key=lambda x: x[1]["totalChange"], reverse=True)
-    down_funds = sorted([(k,v) for k,v in results.items() if v["trend"]=="down"], 
+    down_funds = sorted([(k,v) for k,v in results.items() if v["trend"]=="down"],
                         key=lambda x: x[1]["totalChange"])
-    
     return {
         "total": len(results),
         "upCount": len(up_funds),
@@ -3404,7 +3566,6 @@ async def get_forecast_batch():
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 if FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
-
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
         return FileResponse(str(FRONTEND_DIST / "index.html"))
