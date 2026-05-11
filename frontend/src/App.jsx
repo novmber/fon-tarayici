@@ -448,6 +448,7 @@ export default function App() {
           onClose={() => setSelected(null)}
           onDeleteFund={handleDelete}
           onRefresh={handleRefresh}
+          onSelectFund={(code) => { setSelected(null); setTimeout(() => setSelected({ code }), 50) }}
         />
       )}
       {/* Footer Disclaimer */}

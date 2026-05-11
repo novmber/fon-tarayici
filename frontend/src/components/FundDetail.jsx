@@ -476,7 +476,7 @@ function RiskScoreInput({ fundCode, onSaved }) {
   )
 }
 
-export default function FundDetail({ fundCode, onClose, onDeleteFund, onRefresh }) {
+export default function FundDetail({ fundCode, onClose, onDeleteFund, onRefresh, onSelectFund }) {
   const [fund, setFund] = useState(null)
   const [forecast, setForecast] = useState(null)
   const [forecastLoading, setForecastLoading] = useState(false)

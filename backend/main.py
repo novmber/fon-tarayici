@@ -19,8 +19,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import DeclarativeBase, sessionmaker, mapped_column, Mapped
-from sqlalchemy import String, Float, Integer, Text, Date, DateTime, select, delete, desc
+from sqlalchemy import String, Float, Integer, Text, Date, DateTime, select, delete, desc, text
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -33,8 +34,13 @@ BASE_DIR = Path(__file__).parent.parent
 DB_PATH = BASE_DIR / "data" / "fon.db"
 DB_PATH.parent.mkdir(exist_ok=True)
 
-engine = create_async_engine(f"sqlite+aiosqlite:///{DB_PATH}", echo=False)
-AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+engine = create_async_engine(
+    f"sqlite+aiosqlite:///{DB_PATH}",
+    echo=False,
+    connect_args={"timeout": 30, "check_same_thread": False},
+    poolclass=StaticPool,
+)
+AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
 _cache: dict = {}
 
 
@@ -86,6 +92,15 @@ class EvolverMemory(Base):
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     snapshot_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
 
+class FonAnaliz(Base):
+    __tablename__ = "fon_analiz_cache"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(index=True)
+    date: Mapped[str] = mapped_column(index=True)
+    analysis_json: Mapped[str] = mapped_column(default="{}")
+
+
+
 
 app = FastAPI(title="Fon Tarayıcı API v2")
 scheduler = AsyncIOScheduler()
@@ -96,6 +111,9 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # WAL modu — eş zamanlı okuma/yazma için
+        await conn.execute(text("PRAGMA journal_mode=WAL"))
+        await conn.execute(text("PRAGMA busy_timeout=30000"))
     print("✅ Database hazır:", DB_PATH)
 
     async def nightly_refresh():
@@ -181,7 +199,12 @@ def _post(endpoint: str, payload: dict) -> dict:
 
 def _ts_to_date(ts) -> str:
     try:
-        ms = int(str(ts).replace(",", "").split(".")[0])
+        s = str(ts).strip()
+        # Yeni API: "2025-05-05" formatı
+        if len(s) == 10 and s[4] == "-":
+            return s
+        # Eski API: timestamp (ms)
+        ms = int(s.replace(",", "").split(".")[0])
         return datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d")
     except Exception:
         return ""
@@ -210,27 +233,22 @@ def _parse_alloc(row: dict) -> list:
 
 
 async def _tefas_history(fund_code: str, days: int = 365) -> list:
-    script = str(Path(__file__).parent / "tefas_fetch.py")
-    all_data = []
-    end_dt = datetime.now()
-    start_dt = end_dt - timedelta(days=days)
-    chunk_days = 60
-    cursor = start_dt
-    while cursor < end_dt:
-        chunk_end = min(cursor + timedelta(days=chunk_days), end_dt)
-        s = cursor.strftime('%d.%m.%Y')
-        e = chunk_end.strftime('%d.%m.%Y')
-        try:
-            result = await asyncio.to_thread(subprocess.run,
-                ["python3", script, "BindHistoryInfo", fund_code, s, e],
-                capture_output=True, text=True, timeout=30)
-            if result.stdout and not result.stdout.strip().startswith("<"):
-                all_data.extend(json.loads(result.stdout).get("data", []))
-        except Exception as ex:
-            print(f"⚠️  TEFAS chunk ({fund_code} {s}-{e}): {ex}")
-        cursor = chunk_end + timedelta(days=1)
-        import time; time.sleep(2)
-    return all_data
+    """Yeni TEFAS API — fonGnlBlgSiraliGetir (curl_cffi)"""
+    import asyncio
+    from datetime import datetime, timedelta
+    try:
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+        script = str(Path(__file__).parent / "tefas_fetch.py")
+        result = await asyncio.to_thread(subprocess.run,
+            ["python3", script, "BindHistoryInfo", fund_code, start, end],
+            capture_output=True, text=True, timeout=60)
+        if result.stdout:
+            return json.loads(result.stdout).get("data", [])
+        return []
+    except Exception as ex:
+        print(f"⚠️  TEFAS history ({fund_code}): {ex}")
+        return []
 
 
 async def _tefas_alloc(fund_code: str, days: int = 60) -> dict:
@@ -244,7 +262,9 @@ async def _tefas_alloc(fund_code: str, days: int = 60) -> dict:
         if not result.stdout or result.stdout.strip().startswith("<"):
             return {}
         out = {}
-        for row in json.loads(result.stdout).get("data", []):
+        _alloc_parsed = json.loads(result.stdout)
+        _alloc_rows = _alloc_parsed.get("data", []) if isinstance(_alloc_parsed, dict) else _alloc_parsed
+        for row in _alloc_rows:
             d = _ts_to_date(row.get("TARIH", ""))
             if d:
                 out[d] = _parse_alloc(row)
@@ -256,17 +276,17 @@ async def _tefas_alloc(fund_code: str, days: int = 60) -> dict:
 
 
 async def _tefas_fund_info(fund_code: str) -> dict:
-    """BindFundInfo: risk skoru, stopaj, valor, fon tipi, yönetici"""
-    today = datetime.now().strftime("%d.%m.%Y")
-    script = str(Path(__file__).parent / "tefas_fetch.py")
+    """Yeni TEFAS API — fonGetiriBazliBilgiGetir (curl_cffi)"""
+    import asyncio
     try:
+        script = str(Path(__file__).parent / "tefas_fetch.py")
         result = await asyncio.to_thread(subprocess.run,
-            ["python3", script, "BindFundInfo", fund_code, today, today],
-            capture_output=True, text=True, timeout=30)
-        if not result.stdout or result.stdout.strip().startswith("<"):
-            return {}
-        data = json.loads(result.stdout).get("data", [])
-        return data[0] if data else {}
+            ["python3", script, "BindFundInfo", fund_code],
+            capture_output=True, text=True, timeout=60)
+        if result.stdout:
+            data = json.loads(result.stdout).get("data", [])
+            return data[0] if data else {}
+        return {}
     except Exception as e:
         print(f"⚠️  TEFAS fund_info ({fund_code}): {e}")
         return {}
@@ -433,9 +453,9 @@ async def _verify_predictions(session: AsyncSession, fund_code: str, current_pri
             pred_rec.last_seen = datetime.utcnow()
             # Confidence'ı doğruluğa göre güncelle
             period_results = [
-                pred.get("result_7d", {}).get("correct"),
-                pred.get("result_14d", {}).get("correct"),
-                pred.get("result_30d", {}).get("correct"),
+                (pred or {}).get("result_7d", {}).get("correct"),
+                (pred or {}).get("result_14d", {}).get("correct"),
+                (pred or {}).get("result_30d", {}).get("correct"),
             ]
             verified = [r for r in period_results if r is not None]
             if verified:
@@ -475,6 +495,19 @@ async def _verify_predictions(session: AsyncSession, fund_code: str, current_pri
             ))
     await session.commit()
 
+
+
+def _calc_risk_score(annual_volatility: float, max_drawdown: float) -> int:
+    """Volatilite ve max drawdown'dan 1-7 risk skoru hesapla (TEFAS standardına yakın)"""
+    vol = annual_volatility or 0
+    dd = max_drawdown or 0
+    if vol < 2 and dd < 2:       return 1
+    elif vol < 5 and dd < 5:     return 2
+    elif vol < 10 and dd < 10:   return 3
+    elif vol < 15 and dd < 15:   return 4
+    elif vol < 25 and dd < 20:   return 5
+    elif vol < 40 and dd < 35:   return 6
+    else:                         return 7
 
 async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
     import math
@@ -573,6 +606,15 @@ async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
             confidence=0.5,
             snapshot_date=today,
         ))
+    # Risk skoru — volatilite+drawdown'dan hesapla, DB'ye yaz
+    try:
+        from sqlalchemy import update as _upd
+        calc_risk = _calc_risk_score(ann_vol, max_dd)
+        await session.execute(_upd(FundRecord).where(
+            FundRecord.fund_code == fund_code
+        ).values(risk_score=calc_risk))
+    except Exception as _re:
+        print(f'Risk skoru yazma hatasi: {_re}')
 
     # Tüm geçmiş snapshot'ları al → sinyal üret
     all_ex = await session.execute(select(EvolverMemory).where(
@@ -757,7 +799,7 @@ async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
                 memory_type="signal",
                 content=signal_content,
                 confidence=0.5,
-                snapshot_date=today_str,
+                snapshot_date=datetime.utcnow().date(),
             ))
 
         # Haber sinyali — Claude web search + Qwen analiz
@@ -1204,7 +1246,7 @@ def _calculate_scorecard(prices: list, monthly_return: float, yearly_return: flo
         max_dd = 0
         for p in prices:
             if p > peak: peak = p
-            dd = (peak-p)/peak*100
+            dd = (peak-p)/peak*100 if peak else 0
             if dd > max_dd: max_dd = dd
         vol_score = max(0, 100 - volatility*8)
         dd_score = max(0, 100 - max_dd*2)
@@ -1220,11 +1262,11 @@ def _calculate_scorecard(prices: list, monthly_return: float, yearly_return: flo
     if len(prices) >= 30:
         wins, total = 0, 0
         for i in range(21, len(prices), 21):
-            r = (prices[i]-prices[i-21])/prices[i-21]*100
+            r = (prices[i]-prices[i-21])/prices[i-21]*100 if prices[i-21] else 0
             if r > mevduat_aylik: wins += 1
             total += 1
         win_rate = (wins/total*100) if total > 0 else 50
-        risk_penalty = (risk_score-4)*3 if risk_score > 4 else 0
+        risk_penalty = (risk_score-4)*3 if (risk_score or 0) > 4 else 0
         scores["yonetim"] = min(100, max(0, round(win_rate-risk_penalty, 1)))
         details["benchmarkWinRate"] = round(win_rate, 1)
     else:
@@ -1563,20 +1605,20 @@ async def _fetch_market_news(fund_type: str, fund_code: str) -> str:
         # Haber çekme başarısız olursa analizi engelleme, sessizce geç
         return ""
         
-async def _analyze_tefas(fund_code: str, fund_info: dict, evolver: dict, history: list, top_holdings: list) -> dict:
+async def _analyze_tefas(fund_code: str, fund_info: dict, evolver: dict, history: list, top_holdings: list, session=None) -> dict:
     """TEFAS + Evolver verisiyle Groq/Llama analizi"""
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key:
         raise HTTPException(500, "ANTHROPIC_API_KEY bulunamadı")
     today_str = datetime.now().strftime("%Y-%m-%d")
     # FonAnaliz tablosunda bu fon için bugün kayıt var mı?
-    stmt = select(FonAnaliz).where(FonAnaliz.code == fund_code, FonAnaliz.date == today_str)
-    res = await session.execute(stmt)
-    existing = res.scalars().first()
-
-    if existing:
+    if session:
+        stmt = select(FonAnaliz).where(FonAnaliz.code == fund_code, FonAnaliz.date == today_str)
+        res = await session.execute(stmt)
+        existing = res.scalars().first()
+        if existing:
+            return json.loads(existing.analysis_json)
         # Eğer varsa, veritabanındaki JSON'u dict'e çevir ve hemen dön (API'ye gitme)
-        return json.loads(existing.analysis_json)
     prices = [r["unit_price"] for r in history if r.get("unit_price", 0) > 0]
     total_return = round((prices[-1] - prices[0]) / prices[0] * 100, 2) if len(prices) >= 2 else 0
     recent_prices = prices[-30:] if len(prices) >= 30 else prices
@@ -1915,7 +1957,7 @@ async def track_fund(payload: dict = Body(...)):
     if not fund_code:
         raise HTTPException(400, "fundCode gerekli")
 
-    rows = await _tefas_history(fund_code, days=365)
+    rows = await _tefas_history(fund_code, days=29)
     if not rows:
         raise HTTPException(404, f"TEFAS'ta {fund_code} bulunamadı")
 
@@ -1963,6 +2005,17 @@ async def track_fund(payload: dict = Body(...)):
                 fund_type=fund_info.get("FONTUR"),
                 top_holdings=json.dumps(top_holdings, ensure_ascii=False),
             ))
+            # Güncel portföy/yatırımcı bilgisi en son kayda
+            latest_date = max(r['date_key'] for r in all_rows) if all_rows else None
+            if latest_date and fund_info.get('PORTFOYBUYUKLUK'):
+                await session.execute(update(FundRecord).where(
+                    FundRecord.fund_code == fund_code,
+                    FundRecord.date_key == latest_date
+                ).values(
+                    total_value=float(fund_info.get('PORTFOYBUYUKLUK', 0)),
+                    participant_count=float(fund_info.get('KISISAYISI', 0)),
+                    share_count=float(fund_info.get('TEDPAYSAYISI', 0)),
+                ))
 
         await session.commit()
         # Tüm geçmiş kayıtları çek — evolver için
@@ -1982,7 +2035,7 @@ async def track_fund(payload: dict = Body(...)):
             "riskScore": int(fund_info.get("RISKDEGERI", 0) or 0) or None,
             "totalValue": float(rows[0].get("PORTFOYBUYUKLUK", 0)) if rows else 0,
             "participantCount": float(rows[0].get("KISISAYISI", 0)) if rows else 0,
-        }, {}, all_rows_full, top_holdings)
+        }, {}, all_rows_full, top_holdings, session=session)
         async with AsyncSessionLocal() as session2:
             from sqlalchemy import update as sa_update
             await session2.execute(sa_update(FundRecord).where(FundRecord.fund_code == fund_code).values(
@@ -2040,12 +2093,13 @@ async def refresh_fund(fund_code: str):
 
         for row in rows:
             d = _ts_to_date(row.get("TARIH", ""))
-            if not d or d in existing:
+            price = float(row.get("FIYAT", 0))
+            if not d or d in existing or price == 0:
                 continue
             session.add(FundRecord(
                 fund_code=fund_code, fund_name=fund_name,
                 date_key=d, month_key=d[:7],
-                unit_price=float(row.get("FIYAT", 0)),
+                unit_price=price,
                 total_value=float(row.get("PORTFOYBUYUKLUK", 0)),
                 participant_count=float(row.get("KISISAYISI", 0)),
                 share_count=float(row.get("TEDPAYSAYISI", 0)),
@@ -2086,11 +2140,31 @@ async def refresh_fund(fund_code: str):
         update_vals = {}
         if fund_info:
             update_vals = {
-                "risk_score": int(fund_info.get("RISKDEGERI", 0) or 0) or None,
                 "stopaj_rate": float(fund_info.get("STOPAJORAN", 0) or 0) or None,
                 "valor": fund_info.get("VALÖR") or fund_info.get("VALOR"),
                 "fund_type": fund_info.get("FONTUR"),
             }
+            # Portföy/yatırımcı — sadece en son kayda yaz
+            latest_dk = all_prices[-1][0] if all_prices else None
+            if latest_dk:
+                update_pv = {}
+                if float(fund_info.get("PORTFOYBUYUKLUK", 0)) > 0:
+                    update_pv["total_value"] = float(fund_info.get("PORTFOYBUYUKLUK", 0))
+                if float(fund_info.get("KISISAYISI", 0)) > 0:
+                    update_pv["participant_count"] = float(fund_info.get("KISISAYISI", 0))
+                if float(fund_info.get("TEDPAYSAYISI", 0)) > 0:
+                    update_pv["share_count"] = float(fund_info.get("TEDPAYSAYISI", 0))
+                if update_pv:
+                    await session.execute(update(FundRecord).where(
+                        FundRecord.fund_code == fund_code,
+                        FundRecord.date_key == latest_dk
+                    ).values(**update_pv))
+            # risk_score sadece yeni API'den gerçek değer geldiyse güncelle
+            new_risk = int(fund_info.get("RISKDEGERI", 0) or 0)
+            if new_risk > 0:
+                update_vals["risk_score"] = new_risk
+            elif existing_meta:
+                update_vals["risk_score"] = existing_meta.risk_score
         elif existing_meta:
             update_vals = {
                 "risk_score": existing_meta.risk_score,
@@ -2113,7 +2187,9 @@ async def refresh_fund(fund_code: str):
             select(FundRecord).where(FundRecord.fund_code == fund_code).order_by(FundRecord.date_key)
         )).scalars().all()
         all_rows_dict = [{"unit_price": r.unit_price, "date_key": r.date_key} for r in all_rows_full]
-        await _update_evolver(session, fund_code, all_rows_dict)
+    async with AsyncSessionLocal() as ev_session:
+        await _update_evolver(ev_session, fund_code, all_rows_dict)
+        await ev_session.commit()
     return {"success": True, "fundCode": fund_code, "newRows": new_count}
 
 
@@ -2181,7 +2257,7 @@ async def analyze_tefas(fund_code: str):
         top_holdings = json.loads(latest.top_holdings or "[]")
 
         # Claude analizi
-        ai = await _analyze_tefas(fund_code, fund_info, evolver, history, top_holdings)
+        ai = await _analyze_tefas(fund_code, fund_info, evolver, history, top_holdings, session=session)
 
         # Tüm kayıtlara yaz
         from sqlalchemy import update
@@ -2252,6 +2328,10 @@ async def analyze_tefas(fund_code: str):
                 ))
             await session.commit()
 
+    # ── Evolver price_pattern her koşulda güncelle ──────────────────
+    async with AsyncSessionLocal() as ev_session:
+        await _update_evolver(ev_session, fund_code, history)
+        await ev_session.commit()
     return {"success": True, "fundCode": fund_code,
             "aiInsights": ai.get("aiInsights", []),
             "dexterRecommendations": ai.get("dexterRecommendations", []),
@@ -2456,7 +2536,7 @@ async def get_funds():
     async with AsyncSessionLocal() as session:
         # Her fon için en son kaydı çek
         all_records = (await session.execute(
-            select(FundRecord).order_by(FundRecord.fund_code, desc(FundRecord.date_key))
+            select(FundRecord).where(FundRecord.unit_price > 0).order_by(FundRecord.fund_code, desc(FundRecord.date_key))
         )).scalars().all()
     seen = set()
     funds = []
@@ -2865,7 +2945,7 @@ async def get_top5():
 
         def ret(n):
             if len(prices) < n: return None
-            return round((prices[-1] / prices[-n] - 1) * 100, 2)
+            return round((prices[-1] / prices[-n] - 1) * 100, 2) if prices[-n] else None
 
         p30 = round(participants[-1] - participants[-21], 0) if len(participants) >= 21 else None
         p90 = round(participants[-1] - participants[-63], 0) if len(participants) >= 63 else None
@@ -3094,12 +3174,13 @@ fonar.com.tr/fon/{f["code"].lower()}
             for f in top5_1m[:10]:
                 rec = seen.get(f["code"])
                 if not rec: continue
-                all_p = (await AsyncSessionLocal().execute(
-                    select(FundRecord.unit_price).where(
-                        FundRecord.fund_code == f["code"],
-                        FundRecord.unit_price > 0
-                    ).order_by(FundRecord.date_key)
-                ))
+                async with AsyncSessionLocal() as _leak_session:
+                    all_p = (await _leak_session.execute(
+                        select(FundRecord.unit_price).where(
+                            FundRecord.fund_code == f["code"],
+                            FundRecord.unit_price > 0
+                        ).order_by(FundRecord.date_key)
+                    ))
         except: pass
         
         # Fallback — top5_1m'den en düşük RSI olanı bul

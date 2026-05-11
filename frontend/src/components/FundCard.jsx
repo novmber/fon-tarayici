@@ -105,7 +105,7 @@ export default function FundCard({ fund, onClick, onRefresh }) {
         <div>
           <div style={{ color: '#475569', fontSize: 10 }}>Portföy</div>
           <div style={{ color: '#94a3b8', fontSize: 12, fontWeight: 600 }}>
-            {fund.totalValue >= 1e9 ? `₺${(fund.totalValue/1e9).toFixed(2)}B` : `₺${(fund.totalValue/1e6).toFixed(1)}M`}
+            {fund.totalValue > 0 ? (fund.totalValue >= 1e9 ? `₺${(fund.totalValue/1e9).toFixed(2)}B` : `₺${(fund.totalValue/1e6).toFixed(1)}M`) : "—"}
           </div>
         </div>
         {fund.participantCount > 0 && (
