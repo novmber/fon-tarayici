@@ -518,7 +518,7 @@ async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
 
     content = json.dumps({
         "avg_daily_return": round(avg_d, 4),
-        "trend": "yukarı" if prices[-1] > prices[0] else "aşağı",
+        "trend": "yukarı" if momentum > 2 else "aşağı" if momentum < -2 else "yatay",
         "volatility_range": round(max(ret30) - min(ret30), 2) if ret30 else 0,
         "volatility_std": round(std_dev, 4),
         "annual_volatility": ann_vol,
