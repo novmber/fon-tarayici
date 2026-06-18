@@ -8,3 +8,12 @@ node_modules/
 frontend/dist/
 *.log
 app.pid
+backend/*.bak*
+backend/*.bak
+backend/main.py.bak*
+backend/main.py12062026
+backend/tefas_client.py06182026
+backend/tefas_fetch.py_06182026
+backend/tefas_fetch_fixed.py
+backend/tefas_client_fixed.py
+backend/venv/
