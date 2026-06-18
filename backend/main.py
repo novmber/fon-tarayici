@@ -6,7 +6,12 @@ Port: 9009
 
 import os, json, asyncio, subprocess, urllib.request, urllib.parse
 import httpx
-import requests as _requests
+from backend.tefas_client import (
+    fetch_history as _tc_history,
+    fetch_fund_info as _tc_fund_info,
+    fetch_allocation as _tc_alloc,
+    fetch_top_holdings as _tc_top_holdings,
+)
 from datetime import datetime, date
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger, timedelta
@@ -117,66 +122,64 @@ async def startup():
     print("✅ Database hazır:", DB_PATH)
 
     async def nightly_refresh():
+        import re as _re
         print("🔄 23:30 otomatik güncelleme başladı...")
         async with AsyncSessionLocal() as session:
             result = await session.execute(select(FundRecord.fund_code).distinct())
             codes = [r[0] for r in result.fetchall()]
-        import asyncio as _asyncio
-        import re as _re
+
         for code in codes:
             try:
-                import httpx
-                async with httpx.AsyncClient() as client:
-                    # Refresh öncesi son fiyatı al
-                    detail_before = await client.get(f"http://localhost:9009/api/funds/{code}", timeout=30)
-                    price_before = detail_before.json().get("unitPrice") if detail_before.status_code == 200 else None
+                # Refresh öncesi son fiyatı doğrudan DB'den al
+                async with AsyncSessionLocal() as s:
+                    row_before = (await s.execute(
+                        select(FundRecord.unit_price).where(FundRecord.fund_code == code)
+                        .order_by(FundRecord.date_key.desc()).limit(1)
+                    )).scalar_one_or_none()
+                price_before = float(row_before) if row_before else None
 
-                    refresh_res = await client.post(f"http://localhost:9009/api/funds/{code}/refresh", timeout=60)
-                    refresh_data = refresh_res.json() if refresh_res.status_code == 200 else {}
-                    new_rows = refresh_data.get("newRows", 0)
+                # Doğrudan refresh fonksiyonunu çağır — HTTP yok
+                refresh_result = await refresh_fund(code)
+                new_rows = refresh_result.get("newRows", 0)
 
-                    # Refresh sonrası fiyatı al
-                    detail_after = await client.get(f"http://localhost:9009/api/funds/{code}", timeout=30)
-                    price_after = detail_after.json().get("unitPrice") if detail_after.status_code == 200 else None
+                # Refresh sonrası fiyat
+                async with AsyncSessionLocal() as s:
+                    row_after = (await s.execute(
+                        select(FundRecord.unit_price).where(FundRecord.fund_code == code)
+                        .order_by(FundRecord.date_key.desc()).limit(1)
+                    )).scalar_one_or_none()
+                price_after = float(row_after) if row_after else None
 
-                    if new_rows == 0 and price_before == price_after:
-                        print(f"  ⏭️ {code} fiyat değişmedi, analiz atlandı")
-                        await _asyncio.sleep(3)
-                        continue
+                if new_rows == 0 and price_before == price_after:
+                    print(f"  ⏭️ {code} fiyat değişmedi, analiz atlandı")
+                    await asyncio.sleep(3)
+                    continue
 
-                    print(f"  ✅ {code} fiyat güncellendi ({new_rows} yeni kayıt), analiz başlıyor...")
-                    await _asyncio.sleep(5)
+                print(f"  ✅ {code} fiyat güncellendi ({new_rows} yeni kayıt), analiz başlıyor...")
+                await asyncio.sleep(5)
 
-                    # Fiyat değişti → AI analizi de güncelle
-                    try:
-                        async with httpx.AsyncClient() as client2:
-                            analyze_res = await client2.post(
-                                f"http://localhost:9009/api/funds/{code}/analyze-tefas", timeout=120
-                            )
-                            if analyze_res.status_code == 200:
-                                print(f"  🤖 {code} analiz tamamlandı")
-                            else:
-                                print(f"  ⚠️ {code} analiz HTTP {analyze_res.status_code}")
-                    except Exception as ae:
-                        ae_str = str(ae)
-                        if "429" in ae_str or "rate_limit" in ae_str.lower():
-                            wait_match = _re.search(r'try again in (\d+)m', ae_str)
-                            wait_min = int(wait_match.group(1)) + 1 if wait_match else 3
-                            print(f"  ⏳ {code} rate limit — {wait_min}dk bekleniyor")
-                            await _asyncio.sleep(wait_min * 60)
-                            # Bir kez daha dene
-                            try:
-                                async with httpx.AsyncClient() as client3:
-                                    await client3.post(f"http://localhost:9009/api/funds/{code}/analyze-tefas", timeout=120)
-                                    print(f"  🤖 {code} analiz tamamlandı (retry)")
-                            except Exception as e2:
-                                print(f"  ❌ {code} retry analiz hata: {e2}")
-                        else:
-                            print(f"  ❌ {code} analiz hata: {ae}")
+                # Doğrudan analyze_tefas fonksiyonunu çağır — HTTP yok
+                try:
+                    await analyze_tefas(code)
+                    print(f"  🤖 {code} analiz tamamlandı")
+                except Exception as ae:
+                    ae_str = str(ae)
+                    if "429" in ae_str or "rate_limit" in ae_str.lower():
+                        wait_match = _re.search(r'try again in (\d+)m', ae_str)
+                        wait_min = int(wait_match.group(1)) + 1 if wait_match else 3
+                        print(f"  ⏳ {code} rate limit — {wait_min}dk bekleniyor")
+                        await asyncio.sleep(wait_min * 60)
+                        try:
+                            await analyze_tefas(code)
+                            print(f"  🤖 {code} analiz tamamlandı (retry)")
+                        except Exception as e2:
+                            print(f"  ❌ {code} retry analiz hata: {e2}")
+                    else:
+                        print(f"  ❌ {code} analiz hata: {ae}")
             except Exception as e:
                 print(f"  ❌ {code} refresh hata: {e}")
+
         print(f"✅ Tamamlandı. {len(codes)} fon güncellendi ve analiz edildi.")
-        import subprocess
         subprocess.Popen(["/bin/bash", "/root/FONAR/export-public.sh"])
         print("📤 Fonar export başlatıldı")
 
@@ -233,86 +236,33 @@ def _parse_alloc(row: dict) -> list:
 
 
 async def _tefas_history(fund_code: str, days: int = 365) -> list:
-    """Yeni TEFAS API — fonGnlBlgSiraliGetir (curl_cffi)"""
-    import asyncio
-    from datetime import datetime, timedelta
+    """TEFAS fiyat geçmişi — tefas_client async modülü"""
     try:
-        end = datetime.now().strftime("%Y%m%d")
-        start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
-        script = str(Path(__file__).parent / "tefas_fetch.py")
-        result = await asyncio.to_thread(subprocess.run,
-            ["python3", script, "BindHistoryInfo", fund_code, start, end],
-            capture_output=True, text=True, timeout=60)
-        if result.stdout:
-            return json.loads(result.stdout).get("data", [])
-        return []
+        return await _tc_history(fund_code, days=days)
     except Exception as ex:
         print(f"⚠️  TEFAS history ({fund_code}): {ex}")
         return []
 
 
 async def _tefas_alloc(fund_code: str, days: int = 60) -> dict:
-    end_str = datetime.now().strftime('%d.%m.%Y')
-    start_str = (datetime.now() - timedelta(days=days)).strftime('%d.%m.%Y')
-    script = str(Path(__file__).parent / "tefas_fetch.py")
+    """TEFAS varlık dağılımı — tefas_client async modülü"""
     try:
-        result = await asyncio.to_thread(subprocess.run,
-            ["python3", script, "BindHistoryAllocation", fund_code, start_str, end_str],
-            capture_output=True, text=True, timeout=30)
-        if not result.stdout or result.stdout.strip().startswith("<"):
-            return {}
-        out = {}
-        _alloc_parsed = json.loads(result.stdout)
-        _alloc_rows = _alloc_parsed.get("data", []) if isinstance(_alloc_parsed, dict) else _alloc_parsed
-        for row in _alloc_rows:
-            d = _ts_to_date(row.get("TARIH", ""))
-            if d:
-                out[d] = _parse_alloc(row)
-        return out
+        return await _tc_alloc(fund_code)
     except Exception as e:
         print(f"⚠️  TEFAS alloc ({fund_code}): {e}")
         return {}
-
-
-
 async def _tefas_fund_info(fund_code: str) -> dict:
-    """Yeni TEFAS API — fonGetiriBazliBilgiGetir (curl_cffi)"""
-    import asyncio
+    """TEFAS fon bilgisi — tefas_client async modülü"""
     try:
-        script = str(Path(__file__).parent / "tefas_fetch.py")
-        result = await asyncio.to_thread(subprocess.run,
-            ["python3", script, "BindFundInfo", fund_code],
-            capture_output=True, text=True, timeout=60)
-        if result.stdout:
-            data = json.loads(result.stdout).get("data", [])
-            return data[0] if data else {}
-        return {}
+        return await _tc_fund_info(fund_code)
     except Exception as e:
         print(f"⚠️  TEFAS fund_info ({fund_code}): {e}")
         return {}
 
 async def _tefas_top_holdings(fund_code: str) -> list:
-    """BindHistoryAllocationTop: top 10 portföy varlığı"""
-    today = datetime.now().strftime("%d.%m.%Y")
-    start = (datetime.now() - timedelta(days=7)).strftime("%d.%m.%Y")
-    script = str(Path(__file__).parent / "tefas_fetch.py")
+    """Top 10 portföy varlığı — tefas_client async modülü"""
     try:
-        result = await asyncio.to_thread(subprocess.run,
-            ["python3", script, "BindHistoryAllocationTop", fund_code, start, today],
-            capture_output=True, text=True, timeout=30)
-        if not result.stdout or result.stdout.strip().startswith("<"):
-            return []
-        rows = json.loads(result.stdout).get("data", [])
-        if not rows:
-            return []
-        latest = rows[-1]
-        holdings = []
-        for i in range(1, 11):
-            name = latest.get(f"VARLIKADI{i}", "")
-            weight = latest.get(f"YUZDE{i}", 0)
-            if name and float(weight or 0) > 0:
-                holdings.append({"name": name, "weight": round(float(weight), 2)})
-        return holdings
+        return await _tc_top_holdings(fund_code)
     except Exception as e:
         print(f"⚠️  TEFAS top_holdings ({fund_code}): {e}")
         return []
@@ -453,9 +403,9 @@ async def _verify_predictions(session: AsyncSession, fund_code: str, current_pri
             pred_rec.last_seen = datetime.utcnow()
             # Confidence'ı doğruluğa göre güncelle
             period_results = [
-                (pred or {}).get("result_7d", {}).get("correct"),
-                (pred or {}).get("result_14d", {}).get("correct"),
-                (pred or {}).get("result_30d", {}).get("correct"),
+                ((pred or {}).get("result_7d") or {}).get("correct"),
+                ((pred or {}).get("result_14d") or {}).get("correct"),
+                ((pred or {}).get("result_30d") or {}).get("correct"),
             ]
             verified = [r for r in period_results if r is not None]
             if verified:
@@ -606,15 +556,8 @@ async def _update_evolver(session: AsyncSession, fund_code: str, rows: list):
             confidence=0.5,
             snapshot_date=today,
         ))
-    # Risk skoru — volatilite+drawdown'dan hesapla, DB'ye yaz
-    try:
-        from sqlalchemy import update as _upd
-        calc_risk = _calc_risk_score(ann_vol, max_dd)
-        await session.execute(_upd(FundRecord).where(
-            FundRecord.fund_code == fund_code
-        ).values(risk_score=calc_risk))
-    except Exception as _re:
-        print(f'Risk skoru yazma hatasi: {_re}')
+    # Risk skoru artık burada hesaplanmıyor — TEFAS'tan refresh akışında geliyor
+    pass
 
     # Tüm geçmiş snapshot'ları al → sinyal üret
     all_ex = await session.execute(select(EvolverMemory).where(
@@ -1607,9 +1550,6 @@ async def _fetch_market_news(fund_type: str, fund_code: str) -> str:
         
 async def _analyze_tefas(fund_code: str, fund_info: dict, evolver: dict, history: list, top_holdings: list, session=None) -> dict:
     """TEFAS + Evolver verisiyle Groq/Llama analizi"""
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        raise HTTPException(500, "ANTHROPIC_API_KEY bulunamadı")
     today_str = datetime.now().strftime("%Y-%m-%d")
     # FonAnaliz tablosunda bu fon için bugün kayıt var mı?
     if session:
@@ -1768,59 +1708,34 @@ FON VERİLERİ:
 - Stopaj: %{fund_info.get("stopajRate", 17.5)} | Valör: {fund_info.get("valor", "T+1/T+2")}
 {scorecard_str}{holdings_str}{alloc_str}{benchmark_str}{anomaly_str}{ev_str}{news_str}{pdf_str}
 
-SCORECARD SINIFI: Bu fonun kompozit notu {scorecard["grade"]} ({scorecard["overall"]}/100). Analizlerini bu nota tutarlı olarak bağla — C notu alan bir fon için "güçlü performans" gibi ifadeler kullanma.
-
-KURALLAR:
-- Türkçe yaz.
-- Sadece yukarıdaki verileri kullan.
-- Benchmark karşılaştırması yap: fonun getirisi mevduatın altındaysa bunu açıkça belirt.
-- "Bu fon mevduattan %X daha az/fazla kazandırdı" gibi somut kıyaslamalar yap.
-- ANOMALİ SİNYALLERİ varsa bunları mutlaka aiInsights veya dexterRecommendations'a yansıt.
-- Kitlesel para çıkışı veya girişi varsa yatırımcıya bunu açıkça söyle.
-- Veri bulunmayan konuda yorum yapma.
-- GÜNCEL PİYASA HABERLERİ varsa, haberlerin fonu nasıl etkileyebileceğini aiInsights veya dexterRecommendations'a bağla. Haberi kopyalama, fona özgü yorum yap.
-- Her tespit en az bir sayısal veri içermelidir.
-- Genel ifadeler kullanma (örn: güçlü performans, iyi getiri vb.)
-- Her tespit "veri → sonuç" formatında olmalıdır.
-- Fonun performansı, risk seviyesi ve yatırımcı davranışı hakkında somut analiz üret.
-- Analiz TEFAS fon verilerine uygun olmalıdır.
-- twitterSummary 280 karakteri geçmemeli, gerçek sayılar kullanılmalı.
-- JSON dışında hiçbir çıktı üretme.
-- aiInsights: Her biri veri-sonuç formatında, sayısal içeren 5 analitik tespit.
-- dexterRecommendations: Teknik bilgisi olmayan bireysel yatırımcıya yönelik 3 somut aksiyon önerisi. Pasif ifadeler KESİNLİKLE YASAK. Her öneri bir koşul veya aksiyon içermeli. Teknik terim kullanma (Sharpe, volatilite, beta, kazanç skoru yasak). Günlük dil kullan. İyi örnek: Son ayda yüzde 7 düşen bu fon ortalamasının çok altında, yeni giriş yapmak yerine toparlanmayı bekle. İyi örnek: Paranın yüzde 68i dolar bazlı hisselerde, dolar yükselirse fon değer kazanır. Kötü örnek: Yatırımcılar riski dikkate almalıdır, BU TARZI YAZMA.
-İyi örnek 3: Bu fon 1 yılda yüzde 104 kazandırdı ama bu ay sert düştü, varsa karının bir kısmını çek, tamamını tutma.
-İyi örnek 4: Fon yüzde 17.5 stopaj kesiyor, kısa vadeli alım satım yaparsan bu vergiyi sık ödersin, uzun tut.
-
-
-Örnek tespit: "Aylık getiri %{monthly_return} olup 6 aylık ortalama olan %{avg_6m_monthly}'in {'üzerindedir' if avg_6m_monthly and monthly_return > avg_6m_monthly else 'altındadır'}."
-
-ÇIKTI (sadece JSON):
+KURALLAR: Türkçe yaz. Sayısal veri kullan. Teknik terim kullanma.
+aiInsights: 5 analitik tespit (veri→sonuç, sayısal içeren)
+dexterRecommendations: 3 somut aksiyon (günlük dil, koşul veya aksiyon içeren)
+ÇIKTI (sadece JSON, başka hiçbir şey yazma):
 {{"aiInsights":["tespit1","tespit2","tespit3","tespit4","tespit5"],
   "dexterRecommendations":["öneri1","öneri2","öneri3"]}}"""
 
-    client = anthropic.Anthropic(api_key=api_key)
-    loop = asyncio.get_running_loop()
     try:
-        resp = await loop.run_in_executor(None, lambda: client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=400,
-            system="Sen bir Türk yatırım fonu analistisin. Sadece JSON döndür, başka hiçbir şey yazma.",
-            messages=[{"role": "user", "content": prompt}]
-        ))
-        text = resp.content[0].text
+        import httpx as _httpx
+        async with _httpx.AsyncClient(timeout=120) as _hc:
+            _resp = await _hc.post("http://localhost:11434/api/generate", json={
+                "model": "gemma3:4b",
+                "prompt": "Sen bir Türk yatırım fonu analistisin. Sadece JSON döndür, başka hiçbir şey yazma.\n\n" + prompt,
+                "stream": False,
+            })
+            text = _resp.json().get("response", "").strip()
         if not text:
             raise Exception("Model boş yanıt döndürdü")
-        text = text.strip()
         if text.startswith("```"):
             text = text.split("```")[1]
             if text.startswith("json"): text = text[4:]
+            text = text.split("```")[0]
         ai = json.loads(text.strip())
-    except Exception as groq_err:
-        err_str = str(groq_err)
-        if "429" in err_str or "rate_limit" in err_str.lower():
-            raise HTTPException(429, f"AI analiz limiti doldu, biraz sonra tekrar deneyin")
-        else:
-            raise
+    except json.JSONDecodeError:
+        ai = {"aiInsights": [], "dexterRecommendations": []}
+    except Exception as _err:
+        print(f"AI analiz detay hatası: {type(_err).__name__}: {_err}")
+        raise HTTPException(500, f"AI analiz hatası: {type(_err).__name__}: {_err}")
 
     # Tweet metnini Python'da oluştur — zengin, Sharpe'sız
     fund_name_full = fund_info.get("name", fund_code)
@@ -2182,6 +2097,13 @@ async def refresh_fund(fund_code: str):
             update_vals["yearly_return"] = calc_yearly
         if update_vals:
             await session.execute(update(FundRecord).where(FundRecord.fund_code == fund_code).values(**update_vals))
+        # portfolio_items güncelle — alloc dict'indeki her tarih için
+        for alloc_date, alloc_items in alloc.items():
+            if alloc_items:
+                await session.execute(update(FundRecord).where(
+                    FundRecord.fund_code == fund_code,
+                    FundRecord.date_key == alloc_date
+                ).values(portfolio_items=json.dumps(alloc_items, ensure_ascii=False)))
         await session.commit()
         all_rows_full = (await session.execute(
             select(FundRecord).where(FundRecord.fund_code == fund_code).order_by(FundRecord.date_key)

@@ -175,7 +175,8 @@ def fetch(endpoint: str, fonkod: str, bastarih: str = "", bittarih: str = "") ->
         return {"data": [fetch_fund_info(fonkod)]}
     elif endpoint == "BindHistoryAllocation":
         alloc = fetch_allocation(fonkod, bastarih or None, bittarih or None)
-        return {"data": list(alloc.values())}
+        # Dict formatında dön: {"data": {"2026-05-07": [...], ...}}
+        return {"data": alloc}
     return {"data": []}
 
 if __name__ == "__main__":
