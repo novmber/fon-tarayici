@@ -237,36 +237,13 @@ async def fetch_allocation(
 
 
 async def fetch_top_holdings(fonkod: str, days: int = 7) -> list:
-    end_dt   = datetime.now()
-    start_dt = end_dt - timedelta(days=days)
-    bas = start_dt.strftime("%d.%m.%Y")
-    bit = end_dt.strftime("%d.%m.%Y")
-
-    session = await _make_session()
-    try:
-        items = await _post(session, "/api/funds/fonPortfoyGetir", {
-            "fonTipi": "YAT", "fonKodu": fonkod,
-            "basTarih": bas, "bitTarih": bit,
-            "dil": "TR",
-        })
-        if not items:
-            items = await _post(session, "/api/funds/dagilimDetayGetirT", {
-                "fonTipi": "YAT", "fonKodu": fonkod,
-                "basTarih": bas, "bitTarih": bit,
-                "dil": "TR", "basSira": 1, "bitSira": 10,
-            })
-    finally:
-        await session.close()
-
-    if not items:
+    """
+    Top varlık dağılımı — dagilimSiraliGetirT'den türetilir.
+    Döndürür: [{"name": ..., "weight": ...}, ...]
+    """
+    alloc = await fetch_allocation(fonkod)
+    if not alloc:
         return []
-
-    latest = items[-1]
-    holdings = []
-    for i in range(1, 11):
-        name   = latest.get(f"VARLIKADI{i}", "") or latest.get(f"varlikAdi{i}", "")
-        weight = latest.get(f"YUZDE{i}", 0)      or latest.get(f"yuzde{i}", 0)
-        if name and float(weight or 0) > 0:
-            holdings.append({"name": name, "weight": round(float(weight), 2)})
-
-    return holdings
+    latest_date = sorted(alloc.keys())[-1]
+    items = alloc[latest_date]
+    return [{"name": x["name"], "weight": x["value"]} for x in items[:10]]
