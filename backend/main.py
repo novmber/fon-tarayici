@@ -2994,310 +2994,265 @@ async def get_top5():
 
 @app.get("/api/daily-tweets")
 async def get_daily_tweets():
-    """Günlük tweet paketi — haftalık rotasyon + haber bazlı"""
+    """Günlük tweet paketi — 5-6 tweet, çeşitli formatlar"""
     from datetime import datetime
-    import sys
-    
+    import sys, random
+
     top5_data = await get_top5()
-    top5_1m = top5_data["top5_1m"]
-    top5_3m = top5_data["top5_3m"]
+    top5_1m   = top5_data["top5_1m"]
+    top5_3m   = top5_data["top5_3m"]
     top5_flow = top5_data["top5_flow"]
     top5_part = top5_data["top5_participants"]
-    top5_1y = top5_data["top5_1y"]
+    top5_1y   = top5_data["top5_1y"]
+
+    months_tr = {1:"Ocak",2:"Şubat",3:"Mart",4:"Nisan",5:"Mayıs",6:"Haziran",
+                 7:"Temmuz",8:"Ağustos",9:"Eylül",10:"Ekim",11:"Kasım",12:"Aralık"}
+    days_tr   = {0:"Pazartesi",1:"Salı",2:"Çarşamba",3:"Perşembe",4:"Cuma",5:"Cumartesi",6:"Pazar"}
+    now    = datetime.now()
+    ay     = f"{months_tr[now.month]} {now.year}"
+    gun    = days_tr[now.weekday()]
+    medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    week   = now.isocalendar()[1]
+    wday   = now.weekday()
+    tweets = []
+
+    def fund_line(f, ret_key):
+        name_short = " ".join(f["name"].split()[:3])
+        val = f.get(ret_key, 0) or 0
+        if ret_key == "moneyFlow30d":
+            val_str = f"+{val/1e6:.0f}M ₺" if val >= 0 else f"{val/1e6:.0f}M ₺"
+        elif ret_key == "participantChange30d":
+            val_str = f"+{int(val):,} kişi"
+        else:
+            sign = "+" if val >= 0 else ""
+            val_str = f"{sign}{val:.1f}%"
+        return f"${f['code']} {val_str} — {name_short}"
 
     # AFO altın getirisi
     afo_ret = None
     try:
-        async with AsyncSessionLocal() as session:
-            afo_recs = (await session.execute(
+        async with AsyncSessionLocal() as _s:
+            afo_recs = (await _s.execute(
                 select(FundRecord).where(FundRecord.fund_code == "AFO")
                 .order_by(FundRecord.date_key)
             )).scalars().all()
             if len(afo_recs) >= 21:
                 afo_ret = round((afo_recs[-1].unit_price / afo_recs[-21].unit_price - 1) * 100, 2)
-    except: pass
+    except:
+        pass
 
-    months_tr = {1:"Ocak",2:"Şubat",3:"Mart",4:"Nisan",5:"Mayıs",6:"Haziran",
-                 7:"Temmuz",8:"Ağustos",9:"Eylül",10:"Ekim",11:"Kasım",12:"Aralık"}
-    days_tr = {0:"Pazartesi",1:"Salı",2:"Çarşamba",3:"Perşembe",4:"Cuma",5:"Cumartesi",6:"Pazar"}
-    now = datetime.now()
-    ay = f"{months_tr[now.month]} {now.year}"
-    gun = days_tr[now.weekday()]
-    medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
-    
-    tweets = []
+    # ── TWEET 1: Günün Teması ──────────────────────────────────────────────────
+    if wday == 0:  # Pazartesi — Aylık Top5
+        lines_t = [f"{medals[i]} {fund_line(f,'return1m')}" for i,f in enumerate(top5_1m[:5])]
+        bench = f"\nAltın (AFO): {afo_ret:+.1f}%" if afo_ret is not None else ""
+        t = "🏆 " + ay + " En İyi 5 TEFAS Fonu\n\n"
+        t += "\n".join(lines_t)
+        t += bench
+        t += "\n\n📌 Mevduat kıyası: ~%3.5\n\nfonar.com.tr\n#TEFAS #YatırımFonu #Borsa"
+        tweets.append({"type":"top5_aylik","title":"🏆 Aylık Top5","text":t})
 
-    def fund_line(f, ret_key, suffix=""):
-        name_short = " ".join(f["name"].split()[:2])
-        val = f.get(ret_key, 0) or 0
-        sign = "+" if val >= 0 else ""
-        if ret_key == "moneyFlow30d":
-            val_str = f"+{val/1e6:.0f}M ₺" if val > 0 else f"{val/1e6:.0f}M ₺"
-        elif ret_key == "participantChange30d":
-            val_str = f"+{int(val):,} kişi"
-        else:
-            val_str = f"{sign}{val:.1f}%"
-        return f"${f['code']} {val_str} — {name_short}{suffix}"
-
-    # ── PAZARTESI: Top 5 Aylık Getiri ──
-    if now.weekday() == 0:
-        lines = [f"{medals[i]} {fund_line(f,'return1m')}" for i,f in enumerate(top5_1m[:5])]
-        bench = f"\nAltın (AFO): {afo_ret:+.1f}% 📉" if afo_ret and afo_ret < 0 else (f"\nAltın (AFO): +{afo_ret:.1f}%" if afo_ret and afo_ret > 0 else "")
-        t = f"""🏆 {ay} En İyi 5 TEFAS Fonu
-
-{chr(10).join(lines)}
-{bench}
-Mevduat: ~%3.5
-
-Detaylı analiz 👇
-fonar.com.tr
-
-#TEFAS #YatırımFonu #Borsa"""
-        tweets.append({"type":"top5_aylik","title":"🏆 Top 5 Aylık Getiri","text":t})
-
-    # ── SALI: Para Girişi Anomali ──
-    elif now.weekday() == 1:
+    elif wday == 1:  # Salı — Para Girişi
         if top5_flow:
             f = top5_flow[0]
             flow_m = (f["moneyFlow30d"] or 0) / 1e6
             pc = int(f.get("participantChange30d") or 0)
-            t = f"""📈 Son 30 günde en çok para giren fon:
+            name2 = " ".join(f["name"].split()[:3])
+            t = (f"📈 Son 30 günde en çok para giren fon:\n\n"
+                 f"${f['code']} — {name2}\n\n"
+                 f"💰 Giriş: +{flow_m:.0f}M ₺\n"
+                 f"👥 Yeni yatırımcı: +{pc:,} kişi\n"
+                 f"📊 Aylık getiri: {(f.get('return1m') or 0):+.1f}%\n"
+                 f"⚠️ Risk: {f.get('riskScore','?')}/7\n\n"
+                 f"fonar.com.tr/fon/{f['code'].lower()}\n#TEFAS #YatırımFonu #ParaAkışı")
+            tweets.append({"type":"para_girisi","title":"📈 Para Girişi","text":t})
 
-${f["code"]} — {f["name"].split()[0]} {f["name"].split()[1] if len(f["name"].split())>1 else ""}
-
-💰 Para girişi: +{flow_m:.0f}M ₺
-👥 Yeni yatırımcı: +{pc:,} kişi
-📊 Aylık getiri: {(f.get("return1m") or 0):+.1f}%
-⚠️ Risk: {f.get("riskScore","?")}/7
-
-Bu fonu neden tercih ediyorlar?
-fonar.com.tr/fon/{f["code"].lower()}
-
-#TEFAS #YatırımFonu"""
-            tweets.append({"type":"para_girisi","title":"📈 Para Girişi Anomali","text":t})
-
-    # ── CARSAMBA: Scorecard Spotlight — en iyi giriş zamanı ──
-    elif now.weekday() == 2:
-        # En iyi zamanlama skoruna sahip fon
-        best = None
-        best_score = 0
+    elif wday == 2:  # Çarşamba — DB Spotlight
         try:
-            async with AsyncSessionLocal() as session:
-                all_recs = (await session.execute(
+            async with AsyncSessionLocal() as _s:
+                candidates = (await _s.execute(
                     select(FundRecord).where(
-                        FundRecord.fund_code.in_([f["code"] for f in top5_1m[:10]])
-                    ).order_by(desc(FundRecord.date_key))
+                        FundRecord.twitter_summary != "",
+                        FundRecord.twitter_summary != None,
+                        FundRecord.unit_price > 0,
+                    ).order_by(desc(FundRecord.date_key)).limit(300)
                 )).scalars().all()
-                seen = {}
-                for rec in all_recs:
-                    if rec.fund_code not in seen:
-                        seen[rec.fund_code] = rec
-            # Scorecard hesapla
-            for f in top5_1m[:10]:
-                rec = seen.get(f["code"])
-                if not rec: continue
-                async with AsyncSessionLocal() as _leak_session:
-                    all_p = (await _leak_session.execute(
-                        select(FundRecord.unit_price).where(
-                            FundRecord.fund_code == f["code"],
-                            FundRecord.unit_price > 0
-                        ).order_by(FundRecord.date_key)
-                    ))
-        except: pass
-        
-        # Fallback — top5_1m'den en düşük RSI olanı bul
-        f = top5_1m[0] if top5_1m else None
-        if f:
-            t = f"""🔬 Fon Spotlight: ${f["code"]}
+                seen_codes = set()
+                pool = []
+                for rec in candidates:
+                    if rec.fund_code not in seen_codes:
+                        seen_codes.add(rec.fund_code)
+                        pool.append(rec)
+                if pool:
+                    pick = pool[week % len(pool)]
+                    tweets.append({"type":"spotlight","title":f"🔬 Spotlight: {pick.fund_code}","text":pick.twitter_summary})
+        except:
+            pass
 
-{f["name"]}
-
-📈 Aylık: {(f.get("return1m") or 0):+.1f}%
-💼 Portföy: {(f.get("totalValue") or 0)/1e9:.1f}B ₺
-👥 {int(f.get("participantCount") or 0):,} yatırımcı
-⚠️ Risk: {f.get("riskScore","?")}/7
-
-Detaylı scorecard ve analiz:
-fonar.com.tr/fon/{f["code"].lower()}
-
-#TEFAS #{f["code"]} #YatırımFonu"""
-            tweets.append({"type":"spotlight","title":f"🔬 Spotlight: {f['code']}","text":t})
-
-    # ── PERSEMBE: 3 Aylık vs Mevduat ──
-    elif now.weekday() == 3:
+    elif wday == 3:  # Perşembe — 3 Aylık
         if top5_3m:
-            lines3 = [f"{medals[i]} {fund_line(f,'return3m')}" for i,f in enumerate(top5_3m[:5])]
-            best_ret = top5_3m[0].get("return3m") or 0
-            t = f"""📊 Son 3 ayda TEFAS'ta neler oldu?
-
-{chr(10).join(lines3)}
-
-Mevduat aynı dönemde: ~%10.5
-En iyisi mevduatı {round(best_ret/10.5,1)}x geçti 🚀
-
-Tüm fonları karşılaştır:
-fonar.com.tr
-
-#TEFAS #YatırımFonu"""
+            lines_t = [f"{medals[i]} {fund_line(f,'return3m')}" for i,f in enumerate(top5_3m[:5])]
+            best = top5_3m[0].get("return3m") or 0
+            t = "📊 Son 3 ayda TEFAS kazananları:\n\n"
+            t += "\n".join(lines_t)
+            t += f"\n\n🏦 Mevduat: ~%10.5\n🚀 En iyisi mevduatı {round(best/10.5,1)}x geçti\n\nfonar.com.tr\n#TEFAS #YatırımFonu #3Aylık"
             tweets.append({"type":"top5_3aylik","title":"📊 3 Aylık Kazananlar","text":t})
 
-    # ── CUMA: Yatırımcı Artışı ──
-    elif now.weekday() == 4:
+    elif wday == 4:  # Cuma — Yatırımcı Artışı
         if top5_part:
             f = top5_part[0]
             pc = int(f.get("participantChange30d") or 0)
-            t = f"""👥 Son 30 günde en çok yatırımcı çeken fon:
-
-${f["code"]} — {f["name"].split()[0]} {f["name"].split()[1] if len(f["name"].split())>1 else ""}
-
-+{pc:,} yeni yatırımcı katıldı
-Toplam: {int(f.get("participantCount") or 0):,} kişi
-Aylık getiri: {(f.get("return1m") or 0):+.1f}%
-Portföy: {(f.get("totalValue") or 0)/1e9:.1f}B ₺
-
-Kalabalık her zaman haklı mı? 🤔
-fonar.com.tr/fon/{f["code"].lower()}
-
-#TEFAS #YatırımFonu #Fintech"""
+            name2 = " ".join(f["name"].split()[:3])
+            t = (f"👥 Son 30 günde en çok yatırımcı çeken fon:\n\n"
+                 f"${f['code']} — {name2}\n\n"
+                 f"+{pc:,} yeni yatırımcı\n"
+                 f"Toplam: {int(f.get('participantCount') or 0):,} kişi\n"
+                 f"Aylık: {(f.get('return1m') or 0):+.1f}%\n"
+                 f"Portföy: {(f.get('totalValue') or 0)/1e9:.1f}B ₺\n\n"
+                 f"Kalabalık her zaman haklı mı? 🤔\n"
+                 f"fonar.com.tr/fon/{f['code'].lower()}\n#TEFAS #YatırımFonu")
             tweets.append({"type":"yatirimci","title":"👥 Yatırımcı Artışı","text":t})
 
-    # ── CUMARTESI: Haftalık Özet ──
-    elif now.weekday() == 5:
-        lines_1m = [f"{medals[i]} ${f['code']} {(f.get('return1m') or 0):+.1f}%" for i,f in enumerate(top5_1m[:3])]
+    elif wday == 5:  # Cumartesi — Haftalık Özet
+        lines_1m   = [f"{medals[i]} ${f['code']} {(f.get('return1m') or 0):+.1f}%" for i,f in enumerate(top5_1m[:3])]
         lines_flow = [f"💰 ${f['code']} +{(f.get('moneyFlow30d') or 0)/1e6:.0f}M ₺" for f in top5_flow[:2]]
-        t = f"""📅 Haftalık TEFAS Özeti — {ay}
-
-🏆 Bu Haftanın Kazananları:
-{chr(10).join(lines_1m)}
-
-📈 En Çok Para Gireni:
-{chr(10).join(lines_flow)}
-
-Tüm analizler:
-fonar.com.tr
-
-#TEFAS #YatırımFonu #HaftalıkÖzet"""
+        t = f"📅 Haftalık TEFAS Özeti — {ay}\n\n"
+        t += "🏆 Kazananlar:\n" + "\n".join(lines_1m)
+        t += "\n\n📈 En Çok Para Giren:\n" + "\n".join(lines_flow)
+        t += "\n\nfonar.com.tr\n#TEFAS #YatırımFonu #HaftalıkÖzet"
         tweets.append({"type":"haftalik_ozet","title":"📅 Haftalık Özet","text":t})
 
-    # ── PAZAR: Eğitici Tweet (rotasyonlu) ──
-    elif now.weekday() == 6:
-        egitici_tweets = [
-            {
-                "title": "📚 RSI Nedir?",
-                "text": f"""📚 Fon yatırımında RSI ne işe yarar?
-
-RSI (Göreceli Güç Endeksi) bir fonun ne kadar "yorulduğunu" ölçer.
-
-70+ → Aşırı alım, fon pahalanmış olabilir ⚠️
-30- → Aşırı satım, fiyat düşmüş fırsat olabilir 🟢
-30-70 arası → Normal bölge
-
-Örnek: TLY'nin RSI'ı 88 iken giren yatırımcılar
-sonraki haftada ortalama %8 kayıp yaşadı.
-
-Tüm fonların RSI'ını görmek için:
-fonar.com.tr
-
-#TEFAS #YatırımFonu #FinansEğitimi"""
-            },
-            {
-                "title": "📚 Max Drawdown Nedir?",
-                "text": f"""📚 Fon seçerken Max Drawdown'a bak
-
-Max Drawdown = Fonun en yüksek noktadan
-en düşük noktaya kadar düştüğü maksimum kayıp
-
-Örnek:
-✅ %10 max drawdown → güvenli
-⚠️ %25 max drawdown → dikkatli ol
-🔴 %40+ max drawdown → yüksek risk
-
-"Fon %80 kazandı" demek değil ki
-düşüşte %40 kaybetmeyecek.
-
-Detaylı fon analizleri:
-fonar.com.tr
-
-#TEFAS #YatırımFonu #FinansEğitimi"""
-            },
-            {
-                "title": "📚 Para Akışı Nedir?",
-                "text": f"""📚 Akıllı para nereye gidiyor?
-
-Bir fona büyük para girişi oluyorsa
-kurumsal yatırımcılar o fonu tercih ediyor demektir.
-
-Son 30 günde en çok para giren 3 fon:
-{chr(10).join([f"• ${f['code']} +{(f.get('moneyFlow30d') or 0)/1e6:.0f}M ₺" for f in top5_flow[:3]])}
-
-Para akışını takip et:
-fonar.com.tr
-
-#TEFAS #YatırımFonu #FinansEğitimi"""
-            }
+    elif wday == 6:  # Pazar — Eğitici (5 rotasyon)
+        egitici = [
+            ("📚 RSI Nedir?",
+             "📚 Fon yatırımında RSI ne işe yarar?\n\nRSI bir fonun ne kadar \"yorulduğunu\" ölçer.\n\n"
+             "70+ → Aşırı alım ⚠️\n30- → Aşırı satım, fırsat 🟢\n30-70 → Normal bölge\n\n"
+             "fonar.com.tr\n#TEFAS #FinansEğitimi"),
+            ("📚 Max Drawdown Nedir?",
+             "📚 Max Drawdown nedir?\n\nFonun en yüksekten en düşüğe düştüğü kayıp:\n\n"
+             "✅ %10 → güvenli\n⚠️ %25 → dikkatli ol\n🔴 %40+ → yüksek risk\n\n"
+             "\"%80 kazandı\" demek \"%40 kaybetmez\" demek değil.\n\n"
+             "fonar.com.tr\n#TEFAS #FinansEğitimi"),
+            ("📚 Para Akışı Nedir?",
+             "📚 Akıllı para nereye gidiyor?\n\nBüyük para girişi = kurumsal tercih sinyali.\n\n"
+             + "Son 30 günde en çok giren 3 fon:\n"
+             + "\n".join([f"• ${f['code']} +{(f.get('moneyFlow30d') or 0)/1e6:.0f}M ₺" for f in top5_flow[:3]])
+             + "\n\nfonar.com.tr\n#TEFAS #FinansEğitimi"),
+            ("📚 Sharpe Oranı Nedir?",
+             "📚 Sharpe oranı neden önemli?\n\nRisk başına getiriyi ölçer:\n\n"
+             "1+ → iyi\n2+ → çok iyi\n0 altı → riske değmez\n\n"
+             "Yüksek getiri + düşük Sharpe = şans eseri.\n\n"
+             "fonar.com.tr\n#TEFAS #FinansEğitimi"),
+            ("📚 Fon Türleri",
+             "📚 TEFAS'ta hangi fon türü ne işe yarar?\n\n"
+             "🔵 Hisse Senedi → yüksek risk, yüksek getiri\n"
+             "🟡 Borçlanma → düşük risk, faiz getirisi\n"
+             "🟢 Para Piyasası → neredeyse risksiz\n"
+             "🔴 Serbest → her şey olabilir\n"
+             "⚪ Değişken → karma strateji\n\n"
+             "fonar.com.tr\n#TEFAS #FinansEğitimi"),
         ]
-        # Haftanın numarasına göre rotasyon
-        week_num = now.isocalendar()[1] % len(egitici_tweets)
-        eg = egitici_tweets[week_num]
-        tweets.append({"type":"egitici","title":eg["title"],"text":eg["text"]})
+        title, text = egitici[week % len(egitici)]
+        tweets.append({"type":"egitici","title":title,"text":text})
 
-    # ── HER GÜN: Top 5 tweeti de ekle (rotasyon dışında) ──
-    if now.weekday() != 0:  # Pazartesi zaten üstte ekledik
-        lines = [f"{medals[i]} {fund_line(f,'return1m')}" for i,f in enumerate(top5_1m[:5])]
-        bench = f"\nAltın (AFO): {afo_ret:+.1f}% 📉" if afo_ret and afo_ret < 0 else (f"\nAltın (AFO): +{afo_ret:.1f}%" if afo_ret and afo_ret > 0 else "")
-        t = f"""🏆 {ay} En İyi 5 TEFAS Fonu
+    # ── TWEET 2: DB Fon Analiz Spotlight (Çarşamba hariç) ────────────────────
+    if wday != 2:
+        try:
+            async with AsyncSessionLocal() as _s:
+                candidates = (await _s.execute(
+                    select(FundRecord).where(
+                        FundRecord.twitter_summary != "",
+                        FundRecord.twitter_summary != None,
+                        FundRecord.unit_price > 0,
+                    ).order_by(desc(FundRecord.date_key)).limit(300)
+                )).scalars().all()
+                seen_codes = set()
+                pool = []
+                for rec in candidates:
+                    if rec.fund_code not in seen_codes:
+                        seen_codes.add(rec.fund_code)
+                        pool.append(rec)
+                if pool:
+                    pick = pool[(week * 7 + wday) % len(pool)]
+                    tweets.append({
+                        "type": "fon_analiz",
+                        "title": f"🤖 Fon Analiz: {pick.fund_code}",
+                        "text": pick.twitter_summary
+                    })
+        except Exception as _spot2_e:
+            print(f"SPOTLIGHT2 HATA: {_spot2_e}")
 
-{chr(10).join(lines)}
-{bench}
-Mevduat: ~%3.5
+    # ── TWEET 3: Yıllık Top5 (Pazartesi, Çarşamba, Cumartesi) ───────────────
+    if wday in [0, 2, 5] and top5_1y:
+        lines_y = [f"{medals[i]} {fund_line(f,'return1y')}" for i,f in enumerate(top5_1y[:5])]
+        t = "📈 Son 1 yılın TEFAS şampiyonları:\n\n"
+        t += "\n".join(lines_y)
+        t += "\n\n🏦 Enflasyon (TÜFE): ~%35\n\nfonar.com.tr\n#TEFAS #YatırımFonu #YıllıkGetiri"
+        tweets.append({"type":"top5_yillik","title":"📈 Yıllık Top5","text":t})
 
-fonar.com.tr
-#TEFAS #YatırımFonu #Borsa"""
-        tweets.append({"type":"top5_gunluk","title":"🏆 Top 5 (Günlük)","text":t})
+    # ── TWEET 4: Anomali ──────────────────────────────────────────────────────
+    try:
+        async with AsyncSessionLocal() as _s:
+            recent = (await _s.execute(
+                select(FundRecord).where(FundRecord.unit_price > 0)
+                .order_by(desc(FundRecord.date_key)).limit(600)
+            )).scalars().all()
+            fund_prices = {}
+            for rec in recent:
+                if rec.fund_code not in fund_prices:
+                    fund_prices[rec.fund_code] = []
+                if len(fund_prices[rec.fund_code]) < 2:
+                    fund_prices[rec.fund_code].append(rec.unit_price)
+            anomalies = []
+            for code, prices in fund_prices.items():
+                if len(prices) == 2 and prices[1] > 0:
+                    daily_chg = (prices[0] - prices[1]) / prices[1] * 100
+                    if abs(daily_chg) >= 3:
+                        anomalies.append((code, daily_chg))
+            anomalies.sort(key=lambda x: abs(x[1]), reverse=True)
+            if anomalies[:3]:
+                lines_a = []
+                for code, chg in anomalies[:3]:
+                    icon = "🚀" if chg > 0 else "📉"
+                    lines_a.append(f"{icon} ${code} {chg:+.1f}% (günlük)")
+                t = "⚡ Bugün dikkat çeken fon hareketleri:\n\n"
+                t += "\n".join(lines_a)
+                t += "\n\nAni hareketlerin arkasında ne var?\nfonar.com.tr\n#TEFAS #YatırımFonu #Anomali"
+                tweets.append({"type":"anomali","title":"⚡ Anomali","text":t})
+    except:
+        pass
 
-    # ── HER GÜN: Haber bazlı tweet ──
+    # ── TWEET 5: Haber Bazlı ─────────────────────────────────────────────────
     try:
         sys.path.insert(0, str(BASE_DIR / "backend"))
         from news_fetcher import fetch_all_news
         news = fetch_all_news()
         if news:
-            # En alakalı 2 haberi al
             top_news = sorted(news, key=lambda x: x.get("score", 0), reverse=True)[:2]
-            news_lines = []
-            for n in top_news:
-                title = n.get("title","")[:80]
-                source = n.get("source","")
-                news_lines.append(f"• {title} ({source})")
-            
-            # İlgili fon türünü tespit et
+            news_lines = [f"• {n.get('title','')[:80]} ({n.get('source','')})" for n in top_news]
             news_text_all = " ".join([n.get("title","") + " " + n.get("description","") for n in top_news]).lower()
             if any(w in news_text_all for w in ["faiz","tcmb","merkez bankası"]):
-                ilgili = "Borçlanma araçları ve para piyasası fonları etkilenebilir."
-                ilgili_kod = next((f["code"] for f in top5_1m if "BORÇLANMA" in f.get("name","").upper() or "PARA" in f.get("name","").upper()), None)
+                etki = "Borçlanma ve para piyasası fonları etkilenebilir."
+                ilgili_kod = next((f["code"] for f in top5_1m if any(k in f.get("name","").upper() for k in ["BORÇ","PARA"])), None)
             elif any(w in news_text_all for w in ["dolar","kur","döviz"]):
-                ilgili = "Dolar bazlı yabancı fonlar etkilenebilir."
+                etki = "Dövizli yabancı fonlar öne çıkabilir."
                 ilgili_kod = next((f["code"] for f in top5_1m if "YABANCI" in f.get("name","").upper()), None)
             elif any(w in news_text_all for w in ["altın","gold","değerli maden"]):
-                ilgili = "Altın ve emtia fonları öne çıkabilir."
+                etki = "Altın ve emtia fonları etkilenebilir."
                 ilgili_kod = "AFO"
             elif any(w in news_text_all for w in ["borsa","bist","hisse"]):
-                ilgili = "Hisse senedi fonları doğrudan etkilenebilir."
+                etki = "Hisse senedi fonları doğrudan etkilenebilir."
                 ilgili_kod = top5_1m[0]["code"] if top5_1m else None
             else:
-                ilgili = "Piyasa genelinde dikkatli olmak gerekiyor."
+                etki = "Genel piyasa takibinde fayda var."
                 ilgili_kod = None
-
-            news_tweet = f"""📰 Bugünün Piyasa Haberleri
-
-{chr(10).join(news_lines)}
-
-📊 Fon Etkisi:
-{ilgili}"""
+            t = "📰 Bugünün Piyasa Haberleri\n\n"
+            t += "\n".join(news_lines)
+            t += f"\n\n📊 Fon Etkisi:\n{etki}"
             if ilgili_kod:
-                news_tweet += f"\n\nİlgili fon: fonar.com.tr/fon/{ilgili_kod.lower()}"
-            news_tweet += "\n\n#TEFAS #Piyasa #YatırımFonu"
-            tweets.append({"type":"haber","title":"📰 Günün Haberleri","text":news_tweet})
-    except Exception as _ne:
+                t += f"\n\nİlgili: fonar.com.tr/fon/{ilgili_kod.lower()}"
+            t += "\n\n#TEFAS #Piyasa #YatırımFonu"
+            tweets.append({"type":"haber","title":"📰 Günün Haberleri","text":t})
+    except:
         pass
 
     return {
@@ -3307,115 +3262,6 @@ fonar.com.tr
         "tweets": tweets,
         "count": len(tweets)
     }
-
-
-
-"""
-Fon Tarayıcı - Backend API v2
-Yeni mimari: TEFAS önce, PDF opsiyonel
-Port: 9009
-"""
-
-import os, json, asyncio, subprocess, urllib.request, urllib.parse
-import httpx
-import requests as _requests
-from datetime import datetime, date
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger, timedelta
-from pathlib import Path
-from typing import Optional
-
-import anthropic
-from fastapi import FastAPI, UploadFile, File, HTTPException, Body
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import DeclarativeBase, sessionmaker, mapped_column, Mapped
-from sqlalchemy import String, Float, Integer, Text, Date, DateTime, select, delete, desc
-from dotenv import load_dotenv
-
-load_dotenv()
-
-# ── TCMB politika faizi — .env'den al, yoksa güncel varsayılan ──
-TCMB_POLICY_RATE = float(os.getenv("TCMB_POLICY_RATE", "42.5"))
-MEVDUAT_AYLIK = round(TCMB_POLICY_RATE / 12, 2)
-
-
-
-class Base(DeclarativeBase):
-    pass
-
-
-class FundRecord(Base):
-    __tablename__ = "fund_records"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    fund_code: Mapped[str] = mapped_column(String(20), index=True)
-    fund_name: Mapped[str] = mapped_column(String(300))
-    date_key: Mapped[str] = mapped_column(String(10), index=True)
-    month_key: Mapped[str] = mapped_column(String(7), index=True)
-    unit_price: Mapped[float] = mapped_column(Float)
-    total_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    participant_count: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    share_count: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    portfolio_items: Mapped[str] = mapped_column(Text, default="[]")
-    has_pdf_analysis: Mapped[int] = mapped_column(Integer, default=0)
-    monthly_return: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    yearly_return: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    avg_maturity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    monthly_turnover: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    top_holdings: Mapped[str] = mapped_column(Text, default="[]")
-    expenses: Mapped[str] = mapped_column(Text, default="{}")
-    risk_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    stopaj_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    valor: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
-    fund_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    ai_insights: Mapped[str] = mapped_column(Text, default="[]")
-    dexter_recommendations: Mapped[str] = mapped_column(Text, default="[]")
-    twitter_summary: Mapped[str] = mapped_column(Text, default="")
-    raw_pdf_text: Mapped[str] = mapped_column(Text, default="")
-    pdf_summary: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    published: Mapped[Optional[int]] = mapped_column(Integer, default=0, nullable=True)
-
-
-class EvolverMemory(Base):
-    __tablename__ = "evolver_memory"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    fund_code: Mapped[str] = mapped_column(String(20), index=True)
-    memory_type: Mapped[str] = mapped_column(String(50))
-    content: Mapped[str] = mapped_column(Text)
-    confidence: Mapped[float] = mapped_column(Float, default=0.5)
-    occurrence_count: Mapped[int] = mapped_column(Integer, default=1)
-    last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    snapshot_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-
-
-
-# ─── TIMESFM FORECAST ──────────────────────────────────────────────────────────
-_timesfm_model = None
-_timesfm_lock = None
-
-async def _get_timesfm():
-    """TimesFM modelini lazy load et"""
-    global _timesfm_model, _timesfm_lock
-    import asyncio
-    if _timesfm_lock is None:
-        _timesfm_lock = asyncio.Lock()
-    async with _timesfm_lock:
-        if _timesfm_model is None:
-            print("⏳ TimesFM model yükleniyor...")
-            import timesfm
-            loop = asyncio.get_running_loop()
-            def _load():
-                m = timesfm.TimesFM_2p5_200M_torch.from_pretrained("google/timesfm-2.5-200m-pytorch")
-                m.compile(timesfm.ForecastConfig(max_context=512, max_horizon=10, normalize_inputs=True))
-                return m
-            _timesfm_model = await loop.run_in_executor(None, _load)
-            print("✅ TimesFM model hazır")
-    return _timesfm_model
-
-
 
 
 @app.get("/api/forecast/{fund_code}")
